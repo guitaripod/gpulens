@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::ai::{
-    AiSettings, ClassifyRequest, JobError, classify_with, resolve, scrub_command_line,
+    AiSettings, ClassifyRequest, JobError, classify_with, resolve, scrub_command_line, scrub_path,
 };
 use crate::catalog::Catalog;
 use crate::classify::Identifier;
@@ -168,10 +168,12 @@ fn prelearn(
     for meta in unknown {
         let request = ClassifyRequest {
             signature: meta.signature(),
-            executable: meta
-                .exe
-                .as_ref()
-                .map_or_else(|| meta.comm.clone(), |p| p.display().to_string()),
+            executable: scrub_path(
+                &meta
+                    .exe
+                    .as_ref()
+                    .map_or_else(|| meta.comm.clone(), |p| p.display().to_string()),
+            ),
             command_line: scrub_command_line(&meta.cmdline),
             container: meta
                 .container

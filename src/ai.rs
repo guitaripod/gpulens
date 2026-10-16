@@ -20,6 +20,8 @@ const QUEUE_DEPTH: usize = 16;
 const RETRY_AFTER_UNAVAILABLE: Duration = Duration::from_secs(60);
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
 const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1500);
+const NOT_CONNECTED: &str = "the AI helper is not connected yet";
+const PAUSED: &str = "the AI helper is paused after repeated failures";
 
 /// How the helper should find and talk to a model.
 #[derive(Clone, Debug)]
@@ -127,6 +129,12 @@ pub fn spawn(settings: AiSettings, catalog: Arc<Mutex<Catalog>>, notify: Notify)
         .spawn(move || Worker::new(settings, catalog, notify).run(queue))
         .expect("spawning the AI worker thread");
     AiHandle { jobs }
+}
+
+#[cfg(test)]
+pub fn test_handle() -> (AiHandle, Receiver<Job>) {
+    let (jobs, queue) = mpsc::sync_channel(QUEUE_DEPTH);
+    (AiHandle { jobs }, queue)
 }
 
 /// Finds the model to use. A model must have been chosen on purpose (`gpulens setup` or the config file): guessing from whatever happens to be loaded could pick a fine-tuned model that cannot follow instructions, or one someone else is using.
@@ -239,7 +247,12 @@ impl Worker {
     }
 
     fn handle(&mut self, job: Job) {
-        if self.client.is_none() || self.breaker.is_open() {
+        if self.client.is_none() {
+            self.refuse(&job, NOT_CONNECTED);
+            return;
+        }
+        if self.breaker.is_open() {
+            self.refuse(&job, PAUSED);
             return;
         }
         let result = match job {
@@ -258,6 +271,13 @@ impl Worker {
                 self.breaker.record_failure();
                 (self.notify)(Outcome::Failed(reason));
             }
+        }
+    }
+
+    /// The interface waits for narration and explanations, so those are always answered. Classify jobs are dropped here and asked again later by the sampler.
+    fn refuse(&self, job: &Job, reason: &str) {
+        if !matches!(job, Job::Classify(_)) {
+            (self.notify)(Outcome::Failed(reason.to_string()));
         }
     }
 
@@ -501,35 +521,164 @@ fn tidy(text: &str, max: usize) -> String {
     collapsed.chars().take(max).collect()
 }
 
-/// Hides anything in a command line that looks like a credential before it is shown to a model.
+const HIDDEN: &str = "<hidden>";
+
+/// What the value after a flag or header must look like before it is kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pending {
+    Nothing,
+    Value,
+    PortOrValue,
+}
+
+/// Hides anything in a command line that looks like a credential before it is shown to a model. Each argument is split on whitespace, so a quoted `bash -c "... --password x"` is scrubbed word by word and rejoined with single spaces.
 pub fn scrub_command_line(args: &[String]) -> String {
-    let mut scrubbed = Vec::with_capacity(args.len());
-    let mut hide_next = false;
-    for arg in args {
-        if hide_next {
-            scrubbed.push("<hidden>".to_string());
-            hide_next = false;
-            continue;
-        }
-        let lower = arg.to_ascii_lowercase();
-        if let Some((flag, _)) = arg.split_once('=')
-            && looks_secret_name(&flag.to_ascii_lowercase())
-        {
-            scrubbed.push(format!("{flag}=<hidden>"));
-            continue;
-        }
-        if arg.starts_with('-') && looks_secret_name(&lower) {
-            hide_next = true;
-            scrubbed.push(arg.clone());
-            continue;
-        }
-        if looks_like_token(arg) {
-            scrubbed.push("<hidden>".to_string());
-            continue;
-        }
-        scrubbed.push(shorten_home(arg).chars().take(160).collect());
-    }
+    let mut pending = Pending::Nothing;
+    let scrubbed: Vec<String> = args
+        .iter()
+        .map(|arg| scrub_arg(&mut pending, arg))
+        .filter(|text| !text.is_empty())
+        .collect();
     scrubbed.join(" ").chars().take(700).collect()
+}
+
+/// Scrubs one argument. A hidden value swallows the rest of its argument, so `--password hunter 2` does not leak the `2`.
+fn scrub_arg(pending: &mut Pending, arg: &str) -> String {
+    let words: Vec<&str> = arg.split_whitespace().collect();
+    if words.is_empty() {
+        return match std::mem::replace(pending, Pending::Nothing) {
+            Pending::Nothing => String::new(),
+            _ => HIDDEN.to_string(),
+        };
+    }
+    let mut kept = Vec::with_capacity(words.len());
+    for word in words {
+        let (text, swallow_rest) = scrub_word(pending, word);
+        kept.push(text);
+        if swallow_rest {
+            break;
+        }
+    }
+    kept.join(" ").chars().take(160).collect()
+}
+
+/// Returns the scrubbed word and whether the rest of its argument must be dropped.
+fn scrub_word(pending: &mut Pending, word: &str) -> (String, bool) {
+    match std::mem::replace(pending, Pending::Nothing) {
+        Pending::Nothing => {}
+        Pending::Value if is_auth_scheme(word) => {
+            *pending = Pending::Value;
+            return (word.to_string(), false);
+        }
+        Pending::PortOrValue if word.chars().all(|c| c.is_ascii_digit()) => {
+            return (word.to_string(), false);
+        }
+        Pending::Value | Pending::PortOrValue => return (HIDDEN.to_string(), true),
+    }
+    if is_auth_scheme(word) {
+        *pending = Pending::Value;
+        return (word.to_string(), false);
+    }
+    if let Some((flag, _)) = word.split_once('=')
+        && looks_secret_name(&flag.to_ascii_lowercase())
+    {
+        return (format!("{flag}={HIDDEN}"), true);
+    }
+    if word.starts_with('-') && !word.contains('=') && looks_secret_name(&word.to_ascii_lowercase())
+    {
+        *pending = Pending::Value;
+        return (word.to_string(), false);
+    }
+    if word == "-p" || word == "-P" {
+        *pending = Pending::PortOrValue;
+        return (word.to_string(), false);
+    }
+    if let Some(flag) = glued_password_flag(word) {
+        return (format!("{flag}{HIDDEN}"), true);
+    }
+    if let Some((name, value)) = split_header(word)
+        && looks_secret_name(&name.to_ascii_lowercase())
+    {
+        if value.is_empty() || is_auth_scheme(value) {
+            *pending = Pending::Value;
+            return (word.to_string(), false);
+        }
+        return (format!("{name}:{HIDDEN}"), true);
+    }
+    let linked = hide_url_credentials(word);
+    if mentions_sensitive(&linked) {
+        return match linked.split_once('=') {
+            Some((flag, _)) => (format!("{flag}={HIDDEN}"), true),
+            None => (HIDDEN.to_string(), false),
+        };
+    }
+    if looks_like_token(word) {
+        return (HIDDEN.to_string(), false);
+    }
+    (scrub_path(&linked), false)
+}
+
+fn is_auth_scheme(word: &str) -> bool {
+    word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic")
+}
+
+/// `-p` or `-P` glued to a value that is not a port number, such as `-phunter2`.
+fn glued_password_flag(word: &str) -> Option<&str> {
+    let flag = word.get(..2)?;
+    let value = &word[2..];
+    let is_password_flag = matches!(flag, "-p" | "-P");
+    (is_password_flag && !value.is_empty() && !value.chars().all(|c| c.is_ascii_digit()))
+        .then_some(flag)
+}
+
+/// Splits `Name: value` (or `Name:value`) when `Name` is shaped like an HTTP header name.
+fn split_header(word: &str) -> Option<(&str, &str)> {
+    let (name, value) = word.split_once(':')?;
+    let starts_with_letter = name.chars().next()?.is_ascii_alphabetic();
+    let well_formed = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    (starts_with_letter && well_formed).then_some((name, value))
+}
+
+/// Replaces the `user:password@` or `token@` part of every URL with `<hidden>`.
+fn hide_url_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        let after = &rest[at + 3..];
+        out.push_str(&rest[..at + 3]);
+        let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
+        match after[..authority_end].rfind('@') {
+            Some(at_sign) => {
+                out.push_str(HIDDEN);
+                out.push('@');
+                rest = &after[at_sign + 1..];
+            }
+            None => rest = after,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// True when the text names something private: a secret word, a credential store, an SSH or GnuPG key, or a `.env` file.
+fn mentions_sensitive(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "secret",
+        "credential",
+        "passwd",
+        "password",
+        ".ssh/",
+        ".gnupg/",
+        "id_rsa",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
+        || lower
+            .split(['/', '='])
+            .any(|part| part == ".env" || part.starts_with(".env."))
 }
 
 fn looks_secret_name(name: &str) -> bool {
@@ -543,6 +692,7 @@ fn looks_secret_name(name: &str) -> bool {
         "api_key",
         "key",
         "auth",
+        "cookie",
         "credential",
     ]
     .iter()
@@ -561,11 +711,40 @@ fn looks_like_token(arg: &str) -> bool {
         && candidate.chars().any(|c| c.is_ascii_alphabetic())
 }
 
-fn shorten_home(arg: &str) -> String {
-    match arg.strip_prefix("/home/") {
-        Some(rest) => format!("~/{}", rest.split_once('/').map_or("", |(_, tail)| tail)),
-        None => arg.to_string(),
+/// Replaces every `/home/<user>/` and `/Users/<user>/` in the text with `~/`, so the account name never reaches a model.
+pub fn scrub_path(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some((at, root)) = next_home_root(rest) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + root.len()..];
+        let user_end = after
+            .find(|c: char| c == '/' || c.is_whitespace())
+            .unwrap_or(after.len());
+        match after[user_end..].chars().next() {
+            Some('/') if user_end > 0 => {
+                out.push_str("~/");
+                rest = &after[user_end + 1..];
+            }
+            None if user_end > 0 => {
+                out.push('~');
+                rest = "";
+            }
+            _ => {
+                out.push_str(root);
+                rest = after;
+            }
+        }
     }
+    out.push_str(rest);
+    out
+}
+
+fn next_home_root(text: &str) -> Option<(usize, &'static str)> {
+    ["/home/", "/Users/"]
+        .into_iter()
+        .filter_map(|root| text.find(root).map(|at| (at, root)))
+        .min_by_key(|(at, _)| *at)
 }
 
 #[cfg(test)]
@@ -685,5 +864,200 @@ mod tests {
         for schema in [classify_schema(), narrate_schema(), explain_schema()] {
             assert_eq!(schema["additionalProperties"], false);
         }
+    }
+
+    fn collecting_worker() -> (Worker, Arc<Mutex<Vec<Outcome>>>) {
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&outcomes);
+        let settings = AiSettings {
+            base_url: None,
+            model: None,
+            api_key: None,
+            timeout: Duration::from_secs(1),
+            classify: true,
+            narrate: true,
+        };
+        let worker = Worker::new(
+            settings,
+            Arc::new(Mutex::new(Catalog::empty())),
+            Box::new(move |outcome: Outcome| sink.lock().unwrap().push(outcome)),
+        );
+        (worker, outcomes)
+    }
+
+    fn sample_facts() -> Facts {
+        Facts {
+            gpu: "RTX".into(),
+            gpu_busy_percent: 0,
+            memory_used: "1 GiB".into(),
+            memory_total: "2 GiB".into(),
+            memory_free: "1 GiB".into(),
+            apps: Vec::new(),
+            findings: Vec::new(),
+        }
+    }
+
+    fn narrate_job() -> Job {
+        Job::Narrate(NarrateRequest {
+            situation: 7,
+            facts: sample_facts(),
+        })
+    }
+
+    fn explain_job() -> Job {
+        Job::Explain(ExplainRequest {
+            key: "zq-daemon".into(),
+            facts: sample_facts(),
+            focus: "zq-daemon".into(),
+        })
+    }
+
+    fn classify_job() -> Job {
+        Job::Classify(ClassifyRequest {
+            signature: "zq-daemon".into(),
+            executable: "/opt/acme/zq-daemon".into(),
+            command_line: "zq-daemon --serve".into(),
+            container: None,
+            unit: None,
+        })
+    }
+
+    #[test]
+    fn narrate_is_answered_with_failure_when_not_connected() {
+        let (mut worker, outcomes) = collecting_worker();
+        worker.handle(narrate_job());
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![Outcome::Failed(NOT_CONNECTED.into())]
+        );
+    }
+
+    #[test]
+    fn explain_is_answered_with_failure_when_paused() {
+        let (mut worker, outcomes) = collecting_worker();
+        worker.client = Some(ChatClient::new(
+            "http://127.0.0.1:9",
+            "model",
+            None,
+            Duration::from_secs(1),
+        ));
+        for _ in 0..3 {
+            worker.breaker.record_failure();
+        }
+        worker.handle(explain_job());
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![Outcome::Failed(PAUSED.into())]
+        );
+    }
+
+    #[test]
+    fn classify_is_dropped_silently_when_not_connected_or_paused() {
+        let (mut worker, outcomes) = collecting_worker();
+        worker.handle(classify_job());
+        worker.client = Some(ChatClient::new(
+            "http://127.0.0.1:9",
+            "model",
+            None,
+            Duration::from_secs(1),
+        ));
+        for _ in 0..3 {
+            worker.breaker.record_failure();
+        }
+        worker.handle(classify_job());
+        assert!(outcomes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn scrub_handles_each_case_in_the_table() {
+        let cases: &[(&[&str], &str)] = &[
+            (
+                &["bash", "-c", "python serve.py --password hunter2"],
+                "bash -c python serve.py --password <hidden>",
+            ),
+            (
+                &["curl", "-H", "Authorization: Bearer abc"],
+                "curl -H Authorization: Bearer <hidden>",
+            ),
+            (&["curl", "Bearer abc"], "curl Bearer <hidden>"),
+            (
+                &["curl", "-u", "Basic dXNlcjpwYXNz"],
+                "curl -u Basic <hidden>",
+            ),
+            (
+                &["curl", "-H", "X-Api-Key: abc"],
+                "curl -H X-Api-Key: <hidden>",
+            ),
+            (
+                &["curl", "-H", "Cookie: session=abc; theme=dark"],
+                "curl -H Cookie: <hidden>",
+            ),
+            (
+                &["git", "clone", "https://user:pass@host/repo.git"],
+                "git clone https://<hidden>@host/repo.git",
+            ),
+            (
+                &["tool", "--url=https://admin:hunter2@example.com/x"],
+                "tool --url=https://<hidden>@example.com/x",
+            ),
+            (
+                &["git", "fetch", "ssh://token123@host"],
+                "git fetch ssh://<hidden>@host",
+            ),
+            (&["psql", "-p", "5432"], "psql -p 5432"),
+            (&["psql", "-p", "hunter2"], "psql -p <hidden>"),
+            (&["psql", "-phunter2"], "psql -p<hidden>"),
+            (&["psql", "-P", "hunter2"], "psql -P <hidden>"),
+            (&["psql", "-P5432"], "psql -P5432"),
+            (
+                &["tool", "--config=/home/marcus/.env"],
+                "tool --config=<hidden>",
+            ),
+            (
+                &["cp", "/home/marcus/.ssh/id_ed25519", "/tmp/x"],
+                "cp <hidden> /tmp/x",
+            ),
+            (
+                &["tool", "--identity=~/.gnupg/keys"],
+                "tool --identity=<hidden>",
+            ),
+            (&["tool", "/srv/Secrets/app.conf"], "tool <hidden>"),
+            (
+                &["tool", "--input=/home/marcus/Dev/x.py"],
+                "tool --input=~/Dev/x.py",
+            ),
+            (
+                &["python3", "/Users/marcus/proj/main.py"],
+                "python3 ~/proj/main.py",
+            ),
+            (
+                &["tool", "--password", "hunter 2"],
+                "tool --password <hidden>",
+            ),
+            (&["tool", "--token=abc123"], "tool --token=<hidden>"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(scrub_command_line(&args(input)), *expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn scrub_keeps_plain_arguments_and_caps_their_length() {
+        assert_eq!(
+            scrub_command_line(&args(&["ffmpeg", "-i", "in.mp4", "-c:v", "hevc_nvenc"])),
+            "ffmpeg -i in.mp4 -c:v hevc_nvenc"
+        );
+        let long = "x".repeat(200);
+        let out = scrub_command_line(&args(&["tool", long.as_str()]));
+        assert_eq!(out, format!("tool {}", "x".repeat(160)));
+    }
+
+    #[test]
+    fn scrub_path_shortens_every_home_directory() {
+        assert_eq!(scrub_path("/home/marcus/Dev/x"), "~/Dev/x");
+        assert_eq!(scrub_path("/home/marcus/a and /Users/bob/b"), "~/a and ~/b");
+        assert_eq!(scrub_path("/home/marcus"), "~");
+        assert_eq!(scrub_path("/home//x"), "/home//x");
+        assert_eq!(scrub_path("/opt/acme/zq-daemon"), "/opt/acme/zq-daemon");
     }
 }
