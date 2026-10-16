@@ -1,5 +1,7 @@
 //! The top of the screen: title bar, the plain-language story, and the two stacked bars.
 
+use std::time::Instant;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -11,11 +13,12 @@ use super::stack::Segment;
 use super::widgets::{self, TAG_HIDDEN, tag_for};
 use crate::app::{AiStatus, App};
 use crate::format;
-use crate::model::{DeviceView, Workload};
+use crate::model::{DeviceView, Slot, Workload};
 use crate::narrate::{Level, Story};
 
 const LABEL_WIDTH: u16 = 7;
 const VALUE_WIDTH: u16 = 17;
+const NOMINAL_HEADLINE_WIDTH: usize = 240;
 
 /// What the story block will show, decided once per frame so layout and drawing agree.
 pub struct StoryView {
@@ -60,12 +63,19 @@ pub fn story_view(app: &App, story: &Story) -> StoryView {
     }
 }
 
-pub fn needs(view: &StoryView, width: u16) -> StoryNeeds {
+/// How much room the story block always reserves. It depends only on the window size, never on the text, so the panels below never shift when the wording changes.
+pub fn needs(width: u16, height: u16) -> StoryNeeds {
     let usable = usize::from(width.saturating_sub(4)).max(1);
-    let lines = view.headline.width().div_ceil(usable).clamp(1, 2) as u16;
+    let lines = NOMINAL_HEADLINE_WIDTH.div_ceil(usable).clamp(1, 2) as u16;
+    let note_lines = match height {
+        0..=25 => 0,
+        26..=35 => 1,
+        36..=47 => 2,
+        _ => 3,
+    };
     StoryNeeds {
         headline_lines: lines,
-        note_lines: view.notes.len() as u16,
+        note_lines,
     }
 }
 
@@ -211,11 +221,14 @@ pub fn render_bars(buf: &mut Buffer, area: Rect, app: &App) {
         return;
     };
     let theme = &app.theme;
+    let now = app.now;
     let bar_width = area.width.saturating_sub(LABEL_WIDTH + VALUE_WIDTH + 1);
     let bar_x = area.x + LABEL_WIDTH;
+    let busy_now = device.shown_util(now);
+    let used_now = device.shown_mem_used(now);
 
     widgets::text(buf, area.x + 1, area.y, "GPU", theme.dim(), LABEL_WIDTH - 1);
-    let compute = compute_items(device, sample.gpu_util);
+    let compute = compute_items(device, now);
     widgets::labeled_bar(
         buf,
         Rect::new(bar_x, area.y, bar_width, 1),
@@ -223,13 +236,12 @@ pub fn render_bars(buf: &mut Buffer, area: Rect, app: &App) {
         100.0,
         theme,
     );
-    let busy = format!("{}% busy", sample.gpu_util);
     widgets::text(
         buf,
         bar_x + bar_width + 1,
         area.y,
-        &busy,
-        theme.heat(f64::from(sample.gpu_util) / 100.0),
+        &format!("{:.0}% busy", busy_now),
+        theme.heat(busy_now / 100.0),
         VALUE_WIDTH,
     );
 
@@ -241,7 +253,7 @@ pub fn render_bars(buf: &mut Buffer, area: Rect, app: &App) {
         theme.dim(),
         LABEL_WIDTH - 1,
     );
-    let memory = memory_items(device, sample.mem_used);
+    let memory = memory_items(device, now);
     widgets::labeled_bar(
         buf,
         Rect::new(bar_x, area.y + 1, bar_width, 1),
@@ -249,23 +261,36 @@ pub fn render_bars(buf: &mut Buffer, area: Rect, app: &App) {
         sample.mem_total as f64,
         theme,
     );
-    let used = format::bytes_of(sample.mem_used, sample.mem_total);
-    let fraction = sample.mem_used as f64 / sample.mem_total.max(1) as f64;
     widgets::text(
         buf,
         bar_x + bar_width + 1,
         area.y + 1,
-        &used,
-        theme.heat(fraction),
+        &format::bytes_of(used_now, sample.mem_total),
+        theme.heat(used_now as f64 / sample.mem_total.max(1) as f64),
         VALUE_WIDTH,
     );
 }
 
+/// Apps in colour order, the same left to right whatever they are doing, so the bars hold still while their segments grow and shrink.
+fn by_colour(device: &DeviceView) -> Vec<&Workload> {
+    let rank = |slot: Slot| match slot {
+        Slot::Color(index) => index,
+        Slot::Other => u8::MAX,
+    };
+    let mut apps: Vec<&Workload> = device.workloads.iter().collect();
+    apps.sort_by_key(|w| (rank(w.slot), w.id));
+    apps
+}
+
 /// Compute segments scaled so the filled part always equals the card's overall busy figure.
-fn compute_items(device: &DeviceView, gpu_util: u8) -> Vec<(Segment, String)> {
-    let claimed: Vec<&Workload> = device.workloads.iter().filter(|w| w.sm > 0).collect();
-    let sum: f64 = claimed.iter().map(|w| f64::from(w.sm)).sum();
-    let busy = f64::from(gpu_util);
+fn compute_items(device: &DeviceView, now: Instant) -> Vec<(Segment, String)> {
+    let claimed: Vec<(&Workload, f64)> = by_colour(device)
+        .into_iter()
+        .map(|w| (w, w.shown_sm(now)))
+        .filter(|(_, sm)| *sm >= 0.05)
+        .collect();
+    let sum: f64 = claimed.iter().map(|(_, sm)| sm).sum();
+    let busy = device.shown_util(now);
     let scale = if sum > busy && sum > 0.0 {
         busy / sum
     } else {
@@ -273,14 +298,13 @@ fn compute_items(device: &DeviceView, gpu_util: u8) -> Vec<(Segment, String)> {
     };
     let mut items: Vec<(Segment, String)> = claimed
         .iter()
-        .map(|w| {
-            let value = f64::from(w.sm) * scale;
+        .map(|(w, sm)| {
             (
                 Segment {
-                    value,
+                    value: sm * scale,
                     tag: tag_for(w.slot),
                 },
-                format!("{} {}%", w.display_name, w.sm),
+                format!("{} {:.0}%", w.display_name, sm),
             )
         })
         .collect();
@@ -297,27 +321,26 @@ fn compute_items(device: &DeviceView, gpu_util: u8) -> Vec<(Segment, String)> {
     items
 }
 
-fn memory_items(device: &DeviceView, used: u64) -> Vec<(Segment, String)> {
-    let mut holders: Vec<&Workload> = device
-        .workloads
-        .iter()
-        .filter(|w| w.mem_bytes > 0)
+fn memory_items(device: &DeviceView, now: Instant) -> Vec<(Segment, String)> {
+    let holders: Vec<(&Workload, u64)> = by_colour(device)
+        .into_iter()
+        .map(|w| (w, w.shown_mem(now)))
+        .filter(|(_, mem)| *mem > 0)
         .collect();
-    holders.sort_by_key(|w| std::cmp::Reverse(w.mem_bytes));
-    let accounted: u64 = holders.iter().map(|w| w.mem_bytes).sum();
+    let accounted: u64 = holders.iter().map(|(_, mem)| mem).sum();
     let mut items: Vec<(Segment, String)> = holders
         .iter()
-        .map(|w| {
+        .map(|(w, mem)| {
             (
                 Segment {
-                    value: w.mem_bytes as f64,
+                    value: *mem as f64,
                     tag: tag_for(w.slot),
                 },
-                format!("{} {}", w.display_name, format::bytes(w.mem_bytes)),
+                format!("{} {}", w.display_name, format::bytes(*mem)),
             )
         })
         .collect();
-    let rest = used.saturating_sub(accounted);
+    let rest = device.shown_mem_used(now).saturating_sub(accounted);
     if rest > 0 {
         items.push((
             Segment {
@@ -348,7 +371,7 @@ mod tests {
                 observed(2, identity("b", "B", Category::Game), GIB, 40),
             ],
         );
-        let items = compute_items(&m.devices[0], 50);
+        let items = compute_items(&m.devices[0], Instant::now());
         let total: f64 = items.iter().map(|(s, _)| s.value).sum();
         assert!((total - 50.0).abs() < 1e-9);
         assert_eq!(items.len(), 2);
@@ -363,7 +386,7 @@ mod tests {
             2 * GIB,
             vec![observed(1, identity("a", "A", Category::Ai), GIB, 50)],
         );
-        let items = compute_items(&m.devices[0], 70);
+        let items = compute_items(&m.devices[0], Instant::now());
         assert_eq!(items.last().unwrap().0.tag, TAG_HIDDEN);
         assert_eq!(items.last().unwrap().1, "unclaimed 20%");
     }
@@ -380,21 +403,43 @@ mod tests {
                 observed(2, identity("b", "Big", Category::Game), 9 * GIB, 5),
             ],
         );
-        let items = memory_items(&m.devices[0], 12 * GIB);
+        let items = memory_items(&m.devices[0], Instant::now());
         let names: Vec<_> = items.iter().map(|(_, n)| n.as_str()).collect();
         assert_eq!(names, vec!["Big 9.0 GB", "Small 1.0 GB", "reserved 2.0 GB"]);
     }
 
     #[test]
-    fn headline_wraps_to_at_most_two_lines() {
-        let view = StoryView {
-            headline: "x".repeat(500),
-            ai_written: false,
-            notes: vec![(Level::Info, "n".into())],
-            is_error: false,
+    fn story_room_depends_on_the_window_only() {
+        assert_eq!(needs(80, 24).headline_lines, 2);
+        assert_eq!(needs(80, 24).note_lines, 0);
+        assert_eq!(needs(150, 30).note_lines, 1);
+        assert_eq!(needs(150, 40).note_lines, 2);
+        assert_eq!(needs(300, 50).headline_lines, 1);
+        assert_eq!(needs(150, 50).note_lines, 3);
+    }
+
+    #[test]
+    fn bar_segments_keep_their_colour_order_whatever_the_load() {
+        let mut m = model();
+        let apps = |a: u8, b: u8| {
+            vec![
+                observed(1, identity("a", "A", Category::Ai), GIB, a),
+                observed(2, identity("b", "B", Category::Game), GIB, b),
+            ]
         };
-        let needs = needs(&view, 80);
-        assert_eq!(needs.headline_lines, 2);
-        assert_eq!(needs.note_lines, 1);
+        feed(&mut m, 80, 2 * GIB, apps(60, 20));
+        let first: Vec<String> = compute_items(&m.devices[0], Instant::now())
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        feed(&mut m, 80, 2 * GIB, apps(20, 60));
+        let second: Vec<String> = compute_items(&m.devices[0], Instant::now())
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        assert!(
+            first[0].starts_with("A ") && second[0].starts_with("A "),
+            "{first:?} {second:?}"
+        );
     }
 }

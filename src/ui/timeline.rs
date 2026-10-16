@@ -5,6 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Widget};
 
+use super::buckets;
 use super::stack::Segment;
 use super::widgets::{self, TAG_HIDDEN, tag_for};
 use crate::app::{App, Metric};
@@ -199,7 +200,7 @@ pub fn ranked_in_window(
     totals
 }
 
-/// Averages history into one column per terminal cell. The newest frame lands in the last column; a short history leaves the left side empty.
+/// Averages history into one column per terminal cell. Columns are anchored to frame sequence numbers, so finished columns stay put and the chart scrolls one column every few frames; a short history leaves the left side empty.
 pub fn build(
     model: &Model,
     position: usize,
@@ -209,21 +210,17 @@ pub fn build(
     window_frames: usize,
 ) -> ChartData {
     let frames: Vec<&Frame> = device.recent_frames(window_frames).collect();
-    let offset = window_frames.saturating_sub(frames.len());
+    let seqs: Vec<u64> = frames.iter().map(|frame| frame.seq).collect();
     let total = match metric {
         Metric::Compute => 100.0,
         Metric::Memory => device.info.memory_total.max(1) as f64,
     };
-    let columns = (0..width)
-        .map(|column| {
-            let from = column * window_frames / width;
-            let to = ((column + 1) * window_frames / width).max(from + 1);
-            let lo = from.saturating_sub(offset).min(frames.len());
-            let hi = to.saturating_sub(offset).min(frames.len());
-            if from < offset && to <= offset || lo >= hi {
-                return Vec::new();
-            }
-            column_segments(model, position, &frames[lo..hi], metric)
+    let columns = buckets::column_ranges(&seqs, width, window_frames)
+        .into_iter()
+        .map(|range| {
+            range.map_or_else(Vec::new, |range| {
+                column_segments(model, position, &frames[range], metric)
+            })
         })
         .collect();
     ChartData { columns, total }
@@ -286,6 +283,7 @@ mod tests {
     use super::*;
     use crate::model::testing::*;
     use crate::types::Category;
+    use std::time::Duration;
 
     fn busy_model(ticks: usize) -> Model {
         let mut m = model();
@@ -383,6 +381,38 @@ mod tests {
             .map(|(id, _)| m.name_of(0, id).to_string())
             .collect();
         assert_eq!(ranked, vec!["B", "A"]);
+    }
+
+    fn ramping_model(ticks: u64) -> Model {
+        let mut m = Model::new(
+            vec![device_info()],
+            Duration::from_secs(1),
+            Duration::from_secs(2000),
+        );
+        for tick in 0..ticks {
+            feed(
+                &mut m,
+                60,
+                10 * GIB,
+                vec![observed(
+                    1,
+                    identity("a", "A", Category::Ai),
+                    6 * GIB,
+                    (tick % 37) as u8,
+                )],
+            );
+        }
+        m
+    }
+
+    #[test]
+    fn one_more_frame_only_scrolls_finished_columns() {
+        let before = ramping_model(1500);
+        let after = ramping_model(1501);
+        let old = build(&before, 0, &before.devices[0], Metric::Compute, 10, 1000);
+        let new = build(&after, 0, &after.devices[0], Metric::Compute, 10, 1000);
+        assert!(old.columns.iter().all(|c| !c.is_empty()));
+        assert_eq!(new.columns[..9], old.columns[1..]);
     }
 
     #[test]

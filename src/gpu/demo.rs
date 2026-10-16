@@ -164,6 +164,15 @@ const APPS: [DemoApp; 11] = [
     },
 ];
 
+const GAME_PID: Pid = 41004;
+const GAME_RUN_TICKS: u64 = 150;
+const GAME_CYCLE_TICKS: u64 = 240;
+
+/// The game quits and restarts on a cycle, so the demo shows an app arriving and leaving; everything else keeps running.
+fn is_running(app: &DemoApp, tick: u64) -> bool {
+    app.pid != GAME_PID || tick % GAME_CYCLE_TICKS < GAME_RUN_TICKS
+}
+
 /// Smooth, repeatable oscillation in 0.0..=1.0 with the given period in ticks.
 fn wave(tick: u64, period: f64) -> f64 {
     ((tick as f64 / period).sin() + 1.0) / 2.0
@@ -229,6 +238,7 @@ impl GpuBackend for DemoBackend {
         self.tick += 1;
         let processes: Vec<GpuProcess> = APPS
             .iter()
+            .filter(|app| is_running(app, tick))
             .map(|app| GpuProcess {
                 pid: app.pid,
                 device: 0,
@@ -316,6 +326,17 @@ mod tests {
         let b = DemoBackend::starting_at(50).sample().unwrap();
         assert_eq!(a.devices, b.devices);
         assert_eq!(a.processes, b.processes);
+    }
+
+    #[test]
+    fn the_game_leaves_and_comes_back() {
+        let mut backend = DemoBackend::new();
+        let counts: Vec<usize> = (0..250)
+            .map(|_| backend.sample().unwrap().processes.len())
+            .collect();
+        assert_eq!(counts[0], 11);
+        assert_eq!(counts[160], 10);
+        assert_eq!(counts[245], 11);
     }
 
     #[test]

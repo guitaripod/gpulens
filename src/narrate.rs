@@ -32,17 +32,17 @@ pub struct Story {
 }
 
 pub fn story(device: &DeviceView, interval: Duration) -> Story {
-    let Some(sample) = device.sample.as_ref() else {
+    if device.sample.is_none() {
         return Story {
             headline: "Waiting for the first reading…".into(),
             memory_line: String::new(),
             notes: Vec::new(),
         };
-    };
+    }
     Story {
         headline: headline(device),
         memory_line: memory_line(device),
-        notes: notes(device, sample.gpu_util, interval),
+        notes: notes(device, device.calm_util(), interval),
     }
 }
 
@@ -57,13 +57,13 @@ fn busy_phrase(util: u8) -> &'static str {
 }
 
 fn working_set(device: &DeviceView) -> Vec<&Workload> {
-    let mut active: Vec<&Workload> = device.workloads.iter().filter(|w| w.sm > 0).collect();
-    active.sort_by_key(|w| std::cmp::Reverse(w.sm));
+    let mut active: Vec<&Workload> = device.live().filter(|w| w.calm_sm() > 0).collect();
+    active.sort_by_key(|w| std::cmp::Reverse(w.calm_sm()));
     active
 }
 
 fn headline(device: &DeviceView) -> String {
-    let util = device.sample.as_ref().map_or(0, |s| s.gpu_util);
+    let util = device.calm_util();
     let active = working_set(device);
     let phrase = busy_phrase(util);
     if util < 5 {
@@ -83,12 +83,13 @@ fn headline(device: &DeviceView) -> String {
     match active.as_slice() {
         [only] => format!(
             "The GPU is {phrase} ({util}%). {} is doing the work ({}%).",
-            only.display_name, only.sm
+            only.display_name,
+            only.calm_sm()
         ),
-        [top, rest @ ..] if u32::from(top.sm) * 100 >= u32::from(util) * 60 => format!(
+        [top, rest @ ..] if u32::from(top.calm_sm()) * 100 >= u32::from(util) * 60 => format!(
             "The GPU is {phrase} ({util}%). {} is doing most of the work ({}%){}.",
             top.display_name,
-            top.sm,
+            top.calm_sm(),
             others_clause(rest)
         ),
         many => format!(
@@ -97,7 +98,7 @@ fn headline(device: &DeviceView) -> String {
                 &many
                     .iter()
                     .take(3)
-                    .map(|w| format!("{} ({}%)", w.display_name, w.sm))
+                    .map(|w| format!("{} ({}%)", w.display_name, w.calm_sm()))
                     .collect::<Vec<_>>()
             )
         ),
@@ -108,7 +109,7 @@ fn headline(device: &DeviceView) -> String {
 fn claimed_percent(active: &[&Workload], util: u8) -> u32 {
     active
         .iter()
-        .map(|w| u32::from(w.sm))
+        .map(|w| u32::from(w.calm_sm()))
         .sum::<u32>()
         .min(u32::from(util))
 }
@@ -123,7 +124,7 @@ fn underclaimed_headline(phrase: &str, util: u8, claimed: u32, active: &[&Worklo
     let named: Vec<String> = active
         .iter()
         .take(3)
-        .map(|w| format!("{} ({}%)", w.display_name, w.sm))
+        .map(|w| format!("{} ({}%)", w.display_name, w.calm_sm()))
         .collect();
     format!(
         "The GPU is {phrase} ({util}%), but only {claimed}% of that is tied to apps I can see: {}.",
@@ -133,7 +134,7 @@ fn underclaimed_headline(phrase: &str, util: u8, claimed: u32, active: &[&Worklo
 
 /// Some GPUs (older cards, MIG, virtual GPUs) cannot say which process is busy, so only memory can be attributed.
 fn unattributable_headline(device: &DeviceView, util: u8) -> String {
-    let mut holders: Vec<&Workload> = device.workloads.iter().collect();
+    let mut holders: Vec<&Workload> = device.live().collect();
     holders.sort_by_key(|w| std::cmp::Reverse(w.mem_bytes));
     let named: Vec<String> = holders
         .iter()
@@ -170,18 +171,20 @@ fn others_clause(rest: &[&Workload]) -> String {
 /// The workload doing the most encoding or decoding, when the shaders are idle but video engines are not.
 fn busiest_video_workload(device: &DeviceView) -> Option<&Workload> {
     device
-        .workloads
-        .iter()
-        .filter(|w| w.enc >= 10 || w.dec >= 10)
-        .max_by_key(|w| w.enc.max(w.dec))
+        .live()
+        .filter(|w| w.calm_enc() >= 10 || w.calm_dec() >= 10)
+        .max_by_key(|w| w.calm_enc().max(w.calm_dec()))
 }
 
 fn video_headline(workload: &Workload, util: u8) -> String {
-    let engines: Vec<String> = [("encoder", workload.enc), ("decoder", workload.dec)]
-        .into_iter()
-        .filter(|(_, percent)| *percent > 0)
-        .map(|(engine, percent)| format!("{engine} {percent}%"))
-        .collect();
+    let engines: Vec<String> = [
+        ("encoder", workload.calm_enc()),
+        ("decoder", workload.calm_dec()),
+    ]
+    .into_iter()
+    .filter(|(_, percent)| *percent > 0)
+    .map(|(engine, percent)| format!("{engine} {percent}%"))
+    .collect();
     format!(
         "The GPU's shaders are idle ({util}%), but {} is busy with video work ({}).",
         workload.display_name,
@@ -194,8 +197,7 @@ fn idle_headline(device: &DeviceView, util: u8) -> String {
         return video_headline(video, util);
     }
     let mut holders: Vec<&Workload> = device
-        .workloads
-        .iter()
+        .live()
         .filter(|w| w.mem_bytes >= 256 * 1024 * 1024)
         .collect();
     holders.sort_by_key(|w| std::cmp::Reverse(w.mem_bytes));
@@ -306,8 +308,7 @@ fn idle_holder_note(device: &DeviceView, interval: Duration) -> Option<Note> {
     let threshold = (GIB).max(sample.mem_total / 33);
     let min_ticks = (IDLE_HOLD_SECS as f64 / interval.as_secs_f64()).ceil() as u32;
     let holders: Vec<&Workload> = device
-        .workloads
-        .iter()
+        .live()
         .filter(|w| w.activity == Activity::Idle && w.idle_ticks >= min_ticks)
         .filter(|w| w.mem_bytes >= threshold)
         .collect();
@@ -343,15 +344,15 @@ fn idle_holder_note(device: &DeviceView, interval: Duration) -> Option<Note> {
 
 fn encoder_note(device: &DeviceView) -> Option<Note> {
     let top = device
-        .workloads
-        .iter()
-        .filter(|w| w.enc >= 10)
-        .max_by_key(|w| w.enc)?;
+        .live()
+        .filter(|w| w.calm_enc() >= 10)
+        .max_by_key(|w| w.calm_enc())?;
     note(
         Level::Info,
         format!(
             "{} is using the video encoder ({}%): that means recording or streaming video.",
-            top.display_name, top.enc
+            top.display_name,
+            top.calm_enc()
         ),
     )
 }
@@ -399,19 +400,18 @@ pub fn facts(device: &DeviceView, story: &Story) -> Option<Facts> {
     let sample = device.sample.as_ref()?;
     Some(Facts {
         gpu: device.info.name.clone(),
-        gpu_busy_percent: sample.gpu_util,
+        gpu_busy_percent: device.calm_util(),
         memory_used: format::bytes(sample.mem_used),
         memory_total: format::bytes(sample.mem_total),
         memory_free: format::bytes(sample.mem_free()),
         apps: device
-            .workloads
-            .iter()
+            .live()
             .take(8)
             .map(|w| FactApp {
                 name: w.display_name.clone(),
                 kind: w.identity.category.label().to_string(),
                 what_it_is: w.identity.description.clone(),
-                compute_percent: w.sm,
+                compute_percent: w.calm_sm(),
                 memory: format::bytes(w.mem_bytes),
                 state: w.activity.label().to_string(),
             })
@@ -425,24 +425,19 @@ pub fn situation_signature(device: &DeviceView) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     device.info.index.hash(&mut hasher);
     if let Some(sample) = device.sample.as_ref() {
-        (sample.gpu_util / 25).hash(&mut hasher);
+        (device.calm_util() / 25).hash(&mut hasher);
         (format::share_pct(sample.mem_used, sample.mem_total) / 10).hash(&mut hasher);
         sample.throttle.is_limited().hash(&mut hasher);
     }
     let mut leaders: Vec<&Workload> = device
-        .workloads
-        .iter()
+        .live()
         .filter(|w| w.activity >= Activity::Working)
         .collect();
-    leaders.sort_by_key(|w| (std::cmp::Reverse(w.sm), w.key.clone()));
+    leaders.sort_by_key(|w| (std::cmp::Reverse(w.calm_sm()), w.key.clone()));
     for workload in leaders.iter().take(3) {
         workload.key.hash(&mut hasher);
     }
-    if let Some(biggest) = device
-        .workloads
-        .iter()
-        .max_by_key(|w| (w.mem_bytes, w.key.clone()))
-    {
+    if let Some(biggest) = device.live().max_by_key(|w| (w.mem_bytes, w.key.clone())) {
         biggest.key.hash(&mut hasher);
     }
     hasher.finish()

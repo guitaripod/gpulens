@@ -214,7 +214,9 @@ fn render_row(
     let (swatch, swatch_style) = widgets::swatch(theme, workload.slot);
     widgets::text(buf, rect.x + 1, y, &swatch, swatch_style, 1);
 
-    let name_style = if selected {
+    let name_style = if workload.exited {
+        theme.faint()
+    } else if selected {
         theme.text().add_modifier(Modifier::BOLD)
     } else {
         theme.text()
@@ -258,7 +260,12 @@ fn render_row(
     render_state(buf, rect.x + columns.state_x, y, workload, app);
     render_gpu(buf, rect.x + columns.gpu_x, y, workload, app);
     let (memory, style) = if workload.has_memory_figure() {
-        (format::bytes(workload.mem_bytes), theme.text())
+        let style = if workload.exited {
+            theme.faint()
+        } else {
+            theme.text()
+        };
+        (format::bytes(workload.shown_mem(app.now)), style)
     } else {
         ("n/a".to_string(), theme.faint())
     };
@@ -285,6 +292,17 @@ fn render_state(buf: &mut Buffer, x: u16, y: u16, workload: &Workload, app: &App
         Activity::Light => glyphs.light,
         Activity::Idle => glyphs.idle,
     };
+    if workload.exited {
+        widgets::text(
+            buf,
+            x,
+            y,
+            &format!("{} exited", glyphs.idle),
+            theme.faint(),
+            STATE_WIDTH - 1,
+        );
+        return;
+    }
     let idle_secs = (f64::from(workload.idle_ticks) * app.model.seconds_per_frame()) as u64;
     let mut label = workload.activity.label().to_string();
     if workload.activity == Activity::Idle && idle_secs >= IDLE_NOTE_AFTER_SECS {
@@ -306,28 +324,21 @@ fn render_state(buf: &mut Buffer, x: u16, y: u16, workload: &Workload, app: &App
 
 fn render_gpu(buf: &mut Buffer, x: u16, y: u16, workload: &Workload, app: &App) {
     let theme = &app.theme;
-    if workload.sm > 0 {
+    let sm = workload.shown_sm(app.now);
+    if sm >= 0.5 {
         let bar = Rect::new(x, y, 5, 1);
-        widgets::gauge(
-            buf,
-            bar,
-            f64::from(workload.sm) / 100.0,
-            theme.heat(f64::from(workload.sm) / 100.0),
-            theme,
-        );
-        widgets::text(
-            buf,
-            x + 6,
-            y,
-            &format!("{:>3}%", workload.sm),
-            theme.text(),
-            4,
-        );
-    } else if workload.enc > 0 || workload.dec > 0 {
-        let (label, value) = if workload.enc >= workload.dec {
-            ("enc", workload.enc)
+        let style = if workload.exited {
+            theme.faint()
         } else {
-            ("dec", workload.dec)
+            theme.heat(sm / 100.0)
+        };
+        widgets::gauge(buf, bar, sm / 100.0, style, theme);
+        widgets::text(buf, x + 6, y, &format!("{sm:>3.0}%"), theme.text(), 4);
+    } else if workload.calm_enc() > 0 || workload.calm_dec() > 0 {
+        let (label, value) = if workload.calm_enc() >= workload.calm_dec() {
+            ("enc", workload.calm_enc())
+        } else {
+            ("dec", workload.calm_dec())
         };
         widgets::text(
             buf,

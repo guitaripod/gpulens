@@ -1,5 +1,6 @@
 //! Everything that draws. `draw` is the only entry point; panels are free functions over a buffer.
 
+pub mod buckets;
 pub mod detail;
 pub mod hardware;
 pub mod header;
@@ -22,7 +23,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let story = app.story();
     let view = header::story_view(app, &story);
-    let needs = header::needs(&view, area.width);
+    let needs = header::needs(area.width, area.height);
     let Some(regions) = layout::regions(area, needs) else {
         app.too_small = true;
         overlay::render_too_small(frame.buffer_mut(), area, app);

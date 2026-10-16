@@ -142,7 +142,7 @@ pub fn labeled_bar(
         if wanted + 2 > len {
             continue;
         }
-        let from = start + (len - wanted) / 2;
+        let from = start + 1;
         let style = Style::default()
             .fg(Color::Black)
             .bg(tag_color(theme, segment.tag))

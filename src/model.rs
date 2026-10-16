@@ -1,12 +1,50 @@
 //! The live picture of the GPU: processes grouped into workloads, plus rolling history for the timeline.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crate::smooth::{Tween, blend, ema_alpha};
 use crate::types::{Category, DeviceInfo, DeviceSample, GpuProcess, Identity, ProcMeta};
 
 pub const COLOR_SLOTS: u8 = 8;
 const IMPORTANCE_WINDOW: Duration = Duration::from_secs(300);
+const IMPACT_MARGIN: f64 = 3.0;
+const IMPACT_RATIO: f64 = 1.2;
+const RANK_SMOOTHING_FACTOR: u32 = 3;
+const IDLE_IMPACT: f64 = 1.0;
+const MEMORY_MARGIN_RATIO: f64 = 1.1;
+const MEMORY_MARGIN_BYTES: f64 = 64.0 * 1024.0 * 1024.0;
+const TWEEN_SHARE_OF_INTERVAL: f64 = 0.85;
+
+/// How calm the picture is kept. `RAW` shows every reading as it arrives (tests, one-shot reports); `calm` is what the interface uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tuning {
+    pub smoothing: Duration,
+    pub tween: Duration,
+    pub ghost: Duration,
+    pub lower_dwell: Duration,
+    pub settle: Duration,
+}
+
+impl Tuning {
+    pub const RAW: Tuning = Tuning {
+        smoothing: Duration::ZERO,
+        tween: Duration::ZERO,
+        ghost: Duration::ZERO,
+        lower_dwell: Duration::ZERO,
+        settle: Duration::ZERO,
+    };
+
+    pub const fn calm() -> Tuning {
+        Tuning {
+            smoothing: Duration::from_millis(1500),
+            tween: Duration::from_millis(700),
+            ghost: Duration::from_secs(5),
+            lower_dwell: Duration::from_secs(3),
+            settle: Duration::from_millis(2500),
+        }
+    }
+}
 
 /// A GPU process together with what `/proc` and the classifier know about it.
 #[derive(Clone, Debug)]
@@ -66,7 +104,42 @@ pub enum Slot {
     Other,
 }
 
-/// One application as the user thinks of it: all processes that share an identity key.
+/// What the screen shows for one app, gliding between samples instead of jumping.
+#[derive(Clone, Copy, Debug)]
+pub struct Shown {
+    pub sm: Tween,
+    pub mem: Tween,
+    pub enc: Tween,
+    pub dec: Tween,
+}
+
+impl Shown {
+    fn settled(sm: f64, mem: f64, enc: f64, dec: f64, now: Instant) -> Self {
+        Self {
+            sm: Tween::settled_at(sm, now),
+            mem: Tween::settled_at(mem, now),
+            enc: Tween::settled_at(enc, now),
+            dec: Tween::settled_at(dec, now),
+        }
+    }
+
+    fn retarget(&mut self, sm: f64, mem: f64, enc: f64, dec: f64, now: Instant, span: Duration) {
+        self.sm.retarget(sm, now, span);
+        self.mem.retarget(mem, now, span);
+        self.enc.retarget(enc, now, span);
+        self.dec.retarget(dec, now, span);
+    }
+
+    fn latest_end(&self) -> Instant {
+        [self.sm, self.mem, self.enc, self.dec]
+            .iter()
+            .map(Tween::ends_at)
+            .max()
+            .unwrap_or_else(Instant::now)
+    }
+}
+
+/// One application as the user thinks of it: all processes that share an identity key. `sm`, `enc` and `dec` are the raw latest readings; the `*_avg` values are the calm averages everything user-visible is built from. An app that has just exited lingers for a few seconds with `exited` set, shrinking to nothing.
 #[derive(Clone, Debug)]
 pub struct Workload {
     pub id: WorkloadId,
@@ -77,10 +150,15 @@ pub struct Workload {
     pub sm: u8,
     pub enc: u8,
     pub dec: u8,
+    pub sm_avg: f64,
+    pub enc_avg: f64,
+    pub dec_avg: f64,
     pub mem_bytes: u64,
     pub activity: Activity,
     pub idle_ticks: u32,
     pub slot: Slot,
+    pub exited: bool,
+    pub shown: Shown,
 }
 
 impl Workload {
@@ -92,6 +170,30 @@ impl Workload {
     pub fn category(&self) -> Category {
         self.identity.category
     }
+
+    pub fn calm_sm(&self) -> u8 {
+        percent(self.sm_avg)
+    }
+
+    pub fn calm_enc(&self) -> u8 {
+        percent(self.enc_avg)
+    }
+
+    pub fn calm_dec(&self) -> u8 {
+        percent(self.dec_avg)
+    }
+
+    pub fn shown_sm(&self, now: Instant) -> f64 {
+        self.shown.sm.value(now).clamp(0.0, 100.0)
+    }
+
+    pub fn shown_mem(&self, now: Instant) -> u64 {
+        self.shown.mem.value(now).max(0.0).round() as u64
+    }
+}
+
+fn percent(value: f64) -> u8 {
+    value.round().clamp(0.0, 100.0) as u8
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -121,19 +223,49 @@ pub struct DeviceView {
     pub sample: Option<DeviceSample>,
     pub workloads: Vec<Workload>,
     pub frames: VecDeque<Frame>,
+    pub power_avg: Option<f64>,
+    pub pcie_tx_avg: Option<f64>,
+    pub pcie_rx_avg: Option<f64>,
     next_seq: u64,
-    idle_ticks: HashMap<WorkloadId, u32>,
+    tracks: HashMap<WorkloadId, Track>,
+    order: Vec<WorkloadId>,
+    util_avg: f64,
+    util_tween: Tween,
+    mem_used_tween: Tween,
+}
+
+/// Everything remembered about one app between samples: its smoothed readings, its debounced state and its on-screen glide.
+struct Track {
+    sm_avg: f64,
+    enc_avg: f64,
+    dec_avg: f64,
+    activity: Activity,
+    below_ticks: u32,
+    idle_ticks: u32,
+    absent_ticks: u32,
+    impact: f64,
+    mem: u64,
+    shown: Shown,
+    last: Option<Workload>,
 }
 
 impl DeviceView {
     fn new(info: DeviceInfo) -> Self {
+        let now = Instant::now();
         Self {
             info,
             sample: None,
             workloads: Vec::new(),
             frames: VecDeque::new(),
+            power_avg: None,
+            pcie_tx_avg: None,
+            pcie_rx_avg: None,
             next_seq: 0,
-            idle_ticks: HashMap::new(),
+            tracks: HashMap::new(),
+            order: Vec::new(),
+            util_avg: 0.0,
+            util_tween: Tween::settled_at(0.0, now),
+            mem_used_tween: Tween::settled_at(0.0, now),
         }
     }
 
@@ -141,14 +273,33 @@ impl DeviceView {
         self.workloads.iter().find(|w| w.key == key)
     }
 
+    /// Apps that are really on the GPU, without the ones that are only fading out.
+    pub fn live(&self) -> impl Iterator<Item = &Workload> {
+        self.workloads.iter().filter(|w| !w.exited)
+    }
+
+    /// The overall busy figure, smoothed so it does not twitch from second to second.
+    pub fn calm_util(&self) -> u8 {
+        percent(self.util_avg)
+    }
+
+    pub fn shown_util(&self, now: Instant) -> f64 {
+        self.util_tween.value(now).clamp(0.0, 100.0)
+    }
+
+    pub fn shown_mem_used(&self, now: Instant) -> u64 {
+        self.mem_used_tween.value(now).max(0.0).round() as u64
+    }
+
     pub fn attributed_sm(&self) -> u32 {
-        self.workloads.iter().map(|w| u32::from(w.sm)).sum()
+        self.live().map(|w| u32::from(w.calm_sm())).sum()
     }
 
     /// GPU busy time that no visible process claimed (hidden containers, other users, driver work).
     pub fn unattributed_sm(&self) -> u8 {
-        let busy = u32::from(self.sample.as_ref().map_or(0, |s| s.gpu_util));
-        busy.saturating_sub(self.attributed_sm()).min(100) as u8
+        u32::from(self.calm_util())
+            .saturating_sub(self.attributed_sm())
+            .min(100) as u8
     }
 
     /// The last `count` frames, oldest first.
@@ -194,9 +345,11 @@ pub struct Model {
     pub devices: Vec<DeviceView>,
     pub interval: Duration,
     pub ticks: u64,
+    pub tuning: Tuning,
     registries: Vec<Registry>,
     history: Duration,
     capacity: usize,
+    animating_until: Option<Instant>,
 }
 
 impl Model {
@@ -207,9 +360,21 @@ impl Model {
             devices,
             interval,
             ticks: 0,
+            tuning: Tuning::RAW,
             history,
             capacity: frames_for(history, interval),
+            animating_until: None,
         }
+    }
+
+    pub fn with_tuning(mut self, tuning: Tuning) -> Self {
+        self.tuning = tuning;
+        self
+    }
+
+    /// True while some bar or number is still gliding towards its latest reading, so the interface knows to redraw quickly.
+    pub fn is_animating(&self, now: Instant) -> bool {
+        self.animating_until.is_some_and(|end| now < end)
     }
 
     /// Changes the sampling interval. Frames recorded at the old rate would be misread at the new one, so history restarts and idle timers are rescaled.
@@ -220,8 +385,9 @@ impl Model {
         let ratio = self.interval.as_secs_f64() / interval.as_secs_f64();
         for device in &mut self.devices {
             device.frames.clear();
-            for ticks in device.idle_ticks.values_mut() {
-                *ticks = (f64::from(*ticks) * ratio).round() as u32;
+            for track in device.tracks.values_mut() {
+                track.idle_ticks = (f64::from(track.idle_ticks) * ratio).round() as u32;
+                track.below_ticks = 0;
             }
         }
         self.interval = interval;
@@ -253,6 +419,10 @@ impl Model {
     }
 
     pub fn ingest(&mut self, observation: Observation) {
+        self.ingest_at(observation, Instant::now());
+    }
+
+    pub fn ingest_at(&mut self, observation: Observation, now: Instant) {
         self.ticks += 1;
         let Observation { devices, processes } = observation;
         for (position, sample) in devices.into_iter().enumerate() {
@@ -264,17 +434,29 @@ impl Model {
                 .filter(|p| p.proc.device == position)
                 .cloned()
                 .collect();
-            self.ingest_device(position, sample, procs);
+            self.ingest_device(position, sample, procs, now);
         }
     }
 
-    fn ingest_device(&mut self, position: usize, sample: DeviceSample, procs: Vec<ObservedProc>) {
-        let mut workloads = self.group_into_workloads(position, procs);
-        self.update_idle_counters(position, &mut workloads);
-        self.assign_slots(position, &mut workloads);
-        disambiguate_names(&mut workloads);
-        self.remember_display_names(position, &workloads);
-        sort_by_impact(&mut workloads);
+    fn tween_span(&self) -> Duration {
+        self.tuning
+            .tween
+            .min(self.interval.mul_f64(TWEEN_SHARE_OF_INTERVAL))
+    }
+
+    fn ingest_device(
+        &mut self,
+        position: usize,
+        sample: DeviceSample,
+        procs: Vec<ObservedProc>,
+        now: Instant,
+    ) {
+        let mut live = self.group_into_workloads(position, procs);
+        self.apply_tracks(position, &mut live, now);
+        self.assign_slots(position, &mut live);
+        disambiguate_names(&mut live);
+        self.remember_display_names(position, &live);
+        let live_ids: HashSet<WorkloadId> = live.iter().map(|w| w.id).collect();
 
         let seq = self.devices[position].next_seq;
         self.devices[position].next_seq += 1;
@@ -282,7 +464,7 @@ impl Model {
             seq,
             gpu_util: sample.gpu_util,
             mem_used: sample.mem_used,
-            entries: workloads
+            entries: live
                 .iter()
                 .map(|w| FrameEntry {
                     id: w.id,
@@ -291,13 +473,203 @@ impl Model {
                 })
                 .collect(),
         };
+
+        let mut workloads = live;
+        workloads.extend(self.fading_out(position, &live_ids, now));
+        self.order_workloads(position, &mut workloads);
+        self.smooth_device(position, &sample, now);
+        let capacity = self.capacity;
         let device = &mut self.devices[position];
         device.sample = Some(sample);
         device.workloads = workloads;
         device.frames.push_back(frame);
-        while device.frames.len() > self.capacity {
+        while device.frames.len() > capacity {
             device.frames.pop_front();
         }
+        self.note_animation_end(position);
+    }
+
+    /// Folds the new readings into each app's running state: smoothed values, the debounced activity level, how long it has been idle, and where its bar is gliding to.
+    fn apply_tracks(&mut self, position: usize, workloads: &mut [Workload], now: Instant) {
+        let alpha = ema_alpha(self.interval, self.tuning.smoothing);
+        let rank_alpha = ema_alpha(self.interval, self.tuning.smoothing * RANK_SMOOTHING_FACTOR);
+        let dwell = ticks_for(self.tuning.lower_dwell, self.interval);
+        let span = self.tween_span();
+        let device = &mut self.devices[position];
+        for workload in workloads.iter_mut() {
+            let fresh = !device.tracks.contains_key(&workload.id);
+            let raw = (
+                f64::from(workload.sm),
+                f64::from(workload.enc),
+                f64::from(workload.dec),
+            );
+            let track = device
+                .tracks
+                .entry(workload.id)
+                .and_modify(|t| {
+                    t.sm_avg = blend(t.sm_avg, raw.0, alpha);
+                    t.enc_avg = blend(t.enc_avg, raw.1, alpha);
+                    t.dec_avg = blend(t.dec_avg, raw.2, alpha);
+                })
+                .or_insert_with(|| Track::appearing(raw, now));
+            if fresh {
+                track.activity = Activity::from_util(
+                    percent(track.sm_avg),
+                    percent(track.enc_avg),
+                    percent(track.dec_avg),
+                );
+            } else {
+                let peak = track.sm_avg.max(track.enc_avg).max(track.dec_avg);
+                let target = settle_level(track.activity, peak);
+                track.activity = debounce(track.activity, target, &mut track.below_ticks, dwell);
+            }
+            track.idle_ticks = if track.activity.is_active() {
+                0
+            } else {
+                track.idle_ticks + 1
+            };
+            track.absent_ticks = 0;
+            let instant_impact = track.sm_avg + 0.5 * track.enc_avg.max(track.dec_avg);
+            track.impact = if fresh {
+                instant_impact
+            } else {
+                blend(track.impact, instant_impact, rank_alpha)
+            };
+            track.mem = workload.mem_bytes;
+            track.shown.retarget(
+                track.sm_avg,
+                workload.mem_bytes as f64,
+                track.enc_avg,
+                track.dec_avg,
+                now,
+                span,
+            );
+            workload.sm_avg = track.sm_avg;
+            workload.enc_avg = track.enc_avg;
+            workload.dec_avg = track.dec_avg;
+            workload.activity = track.activity;
+            workload.idle_ticks = track.idle_ticks;
+            workload.shown = track.shown;
+            track.last = Some(workload.clone());
+        }
+    }
+
+    /// Apps that were here a moment ago stay on screen, shrinking to nothing, so an exit reads as something that happened rather than a row vanishing.
+    fn fading_out(
+        &mut self,
+        position: usize,
+        live_ids: &HashSet<WorkloadId>,
+        now: Instant,
+    ) -> Vec<Workload> {
+        let ghost_ticks = ticks_for(self.tuning.ghost, self.interval);
+        let span = self.tween_span();
+        let mut ghosts = Vec::new();
+        self.devices[position].tracks.retain(|id, track| {
+            if live_ids.contains(id) {
+                return true;
+            }
+            track.absent_ticks += 1;
+            if track.absent_ticks > ghost_ticks {
+                return false;
+            }
+            let Some(mut ghost) = track.last.clone() else {
+                return false;
+            };
+            if track.absent_ticks == 1 {
+                track.sm_avg = 0.0;
+                track.enc_avg = 0.0;
+                track.dec_avg = 0.0;
+                track.shown.retarget(0.0, 0.0, 0.0, 0.0, now, span);
+            }
+            ghost.exited = true;
+            ghost.sm = 0;
+            ghost.enc = 0;
+            ghost.dec = 0;
+            ghost.sm_avg = 0.0;
+            ghost.enc_avg = 0.0;
+            ghost.dec_avg = 0.0;
+            ghost.mem_bytes = 0;
+            ghost.activity = Activity::Idle;
+            ghost.idle_ticks = track.absent_ticks;
+            ghost.shown = track.shown;
+            ghosts.push(ghost);
+            true
+        });
+        ghosts
+    }
+
+    /// Keeps the order the user already saw and only moves an app when it is clearly ahead of the one above it, so near-equal apps do not trade places every second.
+    fn order_workloads(&mut self, position: usize, workloads: &mut [Workload]) {
+        let device = &mut self.devices[position];
+        let ranks: HashMap<WorkloadId, (f64, u64)> = workloads
+            .iter()
+            .map(|w| {
+                let rank = device
+                    .tracks
+                    .get(&w.id)
+                    .map_or((0.0, 0), |t| (t.impact, t.mem));
+                (w.id, rank)
+            })
+            .collect();
+        device.order.retain(|id| ranks.contains_key(id));
+        let known: HashSet<WorkloadId> = device.order.iter().copied().collect();
+        let mut newcomers: Vec<WorkloadId> = ranks
+            .keys()
+            .copied()
+            .filter(|id| !known.contains(id))
+            .collect();
+        newcomers.sort_by(|a, b| {
+            let (ra, rb) = (ranks[a], ranks[b]);
+            rb.0.total_cmp(&ra.0).then(rb.1.cmp(&ra.1)).then(a.cmp(b))
+        });
+        device.order.extend(newcomers);
+        settle_order(&mut device.order, &ranks);
+        let place: HashMap<WorkloadId, usize> = device
+            .order
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (*id, index))
+            .collect();
+        workloads.sort_by_key(|w| place[&w.id]);
+    }
+
+    fn smooth_device(&mut self, position: usize, sample: &DeviceSample, now: Instant) {
+        let alpha = ema_alpha(self.interval, self.tuning.smoothing);
+        let span = self.tween_span();
+        let device = &mut self.devices[position];
+        let first = device.sample.is_none();
+        let raw = f64::from(sample.gpu_util);
+        device.util_avg = if first {
+            raw
+        } else {
+            blend(device.util_avg, raw, alpha)
+        };
+        device.power_avg = smoothed(device.power_avg, sample.power_w.map(f64::from), alpha);
+        device.pcie_tx_avg = smoothed(
+            device.pcie_tx_avg,
+            sample.pcie_tx_kbps.map(f64::from),
+            alpha,
+        );
+        device.pcie_rx_avg = smoothed(
+            device.pcie_rx_avg,
+            sample.pcie_rx_kbps.map(f64::from),
+            alpha,
+        );
+        device.util_tween.retarget(device.util_avg, now, span);
+        device
+            .mem_used_tween
+            .retarget(sample.mem_used as f64, now, span);
+    }
+
+    fn note_animation_end(&mut self, position: usize) {
+        let device = &self.devices[position];
+        let latest = device
+            .tracks
+            .values()
+            .map(|t| t.shown.latest_end())
+            .chain([device.util_tween.ends_at(), device.mem_used_tween.ends_at()])
+            .max();
+        self.animating_until = self.animating_until.max(latest);
     }
 
     fn group_into_workloads(&mut self, position: usize, procs: Vec<ObservedProc>) -> Vec<Workload> {
@@ -344,6 +716,7 @@ impl Model {
             total(|m| m.proc.util.enc),
             total(|m| m.proc.util.dec),
         );
+        let mem_bytes: u64 = members.iter().filter_map(|m| m.proc.mem_bytes).sum();
         Workload {
             id,
             key,
@@ -352,26 +725,22 @@ impl Model {
             sm,
             enc,
             dec,
-            mem_bytes: members.iter().filter_map(|m| m.proc.mem_bytes).sum(),
+            sm_avg: f64::from(sm),
+            enc_avg: f64::from(enc),
+            dec_avg: f64::from(dec),
+            mem_bytes,
             activity: Activity::from_util(sm, enc, dec),
             idle_ticks: 0,
             slot: Slot::Other,
+            exited: false,
+            shown: Shown::settled(
+                f64::from(sm),
+                mem_bytes as f64,
+                f64::from(enc),
+                f64::from(dec),
+                Instant::now(),
+            ),
             procs: members,
-        }
-    }
-
-    fn update_idle_counters(&mut self, position: usize, workloads: &mut [Workload]) {
-        let device = &mut self.devices[position];
-        let present: HashSet<WorkloadId> = workloads.iter().map(|w| w.id).collect();
-        device.idle_ticks.retain(|id, _| present.contains(id));
-        for workload in workloads.iter_mut() {
-            let counter = device.idle_ticks.entry(workload.id).or_insert(0);
-            if workload.activity.is_active() {
-                *counter = 0;
-            } else {
-                *counter += 1;
-            }
-            workload.idle_ticks = *counter;
         }
     }
 
@@ -471,6 +840,100 @@ impl Model {
     }
 }
 
+impl Track {
+    /// A newly seen app starts at zero and glides up to its first reading.
+    fn appearing(raw: (f64, f64, f64), now: Instant) -> Self {
+        Self {
+            sm_avg: raw.0,
+            enc_avg: raw.1,
+            dec_avg: raw.2,
+            activity: Activity::Idle,
+            below_ticks: 0,
+            idle_ticks: 0,
+            absent_ticks: 0,
+            impact: 0.0,
+            mem: 0,
+            shown: Shown::settled(0.0, 0.0, 0.0, 0.0, now),
+            last: None,
+        }
+    }
+}
+
+fn ticks_for(span: Duration, interval: Duration) -> u32 {
+    (span.as_secs_f64() / interval.as_secs_f64()).ceil() as u32
+}
+
+/// Where one activity level ends and the next begins, in percent of GPU time.
+const LEVEL_EDGES: [f64; 3] = [0.5, 4.5, 24.5];
+
+const LEVELS: [Activity; 4] = [
+    Activity::Idle,
+    Activity::Light,
+    Activity::Working,
+    Activity::Busy,
+];
+
+/// The level a reading belongs to, with a gap between climbing and falling: a reading has to clear an edge by a margin to move up and sink well below it to move down, so values hovering on a boundary do not flip the label.
+fn settle_level(current: Activity, peak: f64) -> Activity {
+    let mut level = LEVELS.iter().position(|l| *l == current).unwrap_or(0);
+    while level + 1 < LEVELS.len() && peak >= LEVEL_EDGES[level] * 1.25 + 0.6 {
+        level += 1;
+    }
+    while level > 0 && peak < LEVEL_EDGES[level - 1] * 0.8 {
+        level -= 1;
+    }
+    LEVELS[level]
+}
+
+/// Rises at once, but only falls after the lower level has held for the dwell time, so a busy app does not flicker to idle between bursts.
+fn debounce(current: Activity, target: Activity, below: &mut u32, dwell: u32) -> Activity {
+    if target >= current {
+        *below = 0;
+        return target;
+    }
+    *below += 1;
+    if *below >= dwell {
+        *below = 0;
+        target
+    } else {
+        current
+    }
+}
+
+fn smoothed(previous: Option<f64>, new: Option<f64>, alpha: f64) -> Option<f64> {
+    match (previous, new) {
+        (Some(old), Some(value)) => Some(blend(old, value, alpha)),
+        (None, value) => value,
+        (_, None) => None,
+    }
+}
+
+/// True when `a` is clearly ahead of `b`: by a margin of GPU time, or, between apps that are both idle, by a margin of memory.
+fn beats(a: (f64, u64), b: (f64, u64)) -> bool {
+    if a.0 > b.0 * IMPACT_RATIO + IMPACT_MARGIN {
+        return true;
+    }
+    a.0 < IDLE_IMPACT
+        && b.0 < IDLE_IMPACT
+        && a.1 as f64 > b.1 as f64 * MEMORY_MARGIN_RATIO + MEMORY_MARGIN_BYTES
+}
+
+/// Bubbles apps upwards past neighbours they clearly beat; apps that are merely close keep their places.
+fn settle_order(order: &mut [WorkloadId], ranks: &HashMap<WorkloadId, (f64, u64)>) {
+    for _ in 0..order.len() {
+        let mut moved = false;
+        for index in 1..order.len() {
+            if beats(ranks[&order[index]], ranks[&order[index - 1]]) {
+                order.swap(index, index - 1);
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+}
+
 fn frames_for(history: Duration, interval: Duration) -> usize {
     (history.as_secs_f64() / interval.as_secs_f64())
         .ceil()
@@ -500,18 +963,6 @@ fn distinguishing_suffix(workload: &Workload) -> String {
         Some(container) => container.short_id().chars().take(6).collect(),
         None => format!("pid {}", primary.proc.pid),
     }
-}
-
-/// Busiest first, then biggest memory holder, then name for a stable order.
-fn sort_by_impact(workloads: &mut [Workload]) {
-    workloads.sort_by(|a, b| {
-        b.activity
-            .cmp(&a.activity)
-            .then(b.sm.cmp(&a.sm))
-            .then((b.enc.max(b.dec)).cmp(&a.enc.max(a.dec)))
-            .then(b.mem_bytes.cmp(&a.mem_bytes))
-            .then(a.display_name.cmp(&b.display_name))
-    });
 }
 
 #[cfg(test)]
@@ -586,6 +1037,22 @@ pub mod testing {
             Duration::from_secs(1),
             Duration::from_secs(60),
         )
+    }
+
+    pub fn feed_at(
+        model: &mut Model,
+        now: Instant,
+        gpu_util: u8,
+        mem_used: u64,
+        procs: Vec<ObservedProc>,
+    ) {
+        model.ingest_at(
+            Observation {
+                devices: vec![sample(gpu_util, mem_used)],
+                processes: procs,
+            },
+            now,
+        );
     }
 
     pub fn feed(model: &mut Model, gpu_util: u8, mem_used: u64, procs: Vec<ObservedProc>) {
@@ -921,5 +1388,261 @@ mod tests {
         let id = m.devices[0].workloads[0].id;
         feed(&mut m, 0, 0, vec![]);
         assert_eq!(m.name_of(0, id), "vLLM");
+    }
+}
+
+#[cfg(test)]
+mod calm_tests {
+    use super::testing::*;
+    use super::*;
+
+    fn calm_model() -> Model {
+        let tuning = Tuning {
+            smoothing: Duration::from_secs(1),
+            tween: Duration::from_millis(500),
+            ghost: Duration::from_secs(3),
+            lower_dwell: Duration::from_secs(2),
+            settle: Duration::ZERO,
+        };
+        model().with_tuning(tuning)
+    }
+
+    fn app(key: &str, pid: u32, mem: u64, sm: u8) -> ObservedProc {
+        observed(pid, identity(key, key, Category::Other), mem, sm)
+    }
+
+    #[test]
+    fn calm_values_trail_the_raw_reading() {
+        let mut m = calm_model();
+        let t0 = Instant::now();
+        feed_at(&mut m, t0, 10, GIB, vec![app("a", 1, GIB, 10)]);
+        feed_at(
+            &mut m,
+            t0 + Duration::from_secs(1),
+            90,
+            GIB,
+            vec![app("a", 1, GIB, 90)],
+        );
+        let w = &m.devices[0].workloads[0];
+        assert_eq!(w.sm, 90);
+        assert!(w.calm_sm() > 10 && w.calm_sm() < 90, "{}", w.calm_sm());
+        assert!(m.devices[0].calm_util() < 90);
+    }
+
+    #[test]
+    fn a_new_app_glides_in_from_nothing() {
+        let mut m = calm_model();
+        let t0 = Instant::now();
+        feed_at(&mut m, t0, 50, 4 * GIB, vec![app("a", 1, 4 * GIB, 50)]);
+        let w = &m.devices[0].workloads[0];
+        assert_eq!(w.shown_sm(t0), 0.0);
+        assert_eq!(w.shown_mem(t0), 0);
+        let end = t0 + Duration::from_millis(500);
+        assert_eq!(w.shown_sm(end), 50.0);
+        assert_eq!(w.shown_mem(end), 4 * GIB);
+        assert!(m.is_animating(t0 + Duration::from_millis(100)));
+        assert!(!m.is_animating(t0 + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn near_equal_apps_keep_their_places_but_a_clear_leader_moves_up() {
+        let mut m = calm_model();
+        let t0 = Instant::now();
+        let mut at = |tick: u64, a: u8, b: u8| {
+            feed_at(
+                &mut m,
+                t0 + Duration::from_secs(tick),
+                80,
+                2 * GIB,
+                vec![app("a", 1, GIB, a), app("b", 2, GIB, b)],
+            );
+            m.devices[0]
+                .workloads
+                .iter()
+                .map(|w| w.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(at(0, 40, 38), vec!["a", "b"]);
+        for tick in 1..10 {
+            let (a, b) = if tick % 2 == 0 { (38, 41) } else { (42, 37) };
+            assert_eq!(at(tick, a, b), vec!["a", "b"], "tick {tick}");
+        }
+        let mut last = Vec::new();
+        for tick in 10..30 {
+            last = at(tick, 10, 70);
+        }
+        assert_eq!(last, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn a_busy_app_stays_busy_until_it_has_been_quiet_for_the_dwell_time() {
+        let mut m = calm_model();
+        let t0 = Instant::now();
+        let mut label = |tick: u64, sm: u8| {
+            feed_at(
+                &mut m,
+                t0 + Duration::from_secs(tick),
+                50,
+                GIB,
+                vec![app("a", 1, GIB, sm)],
+            );
+            m.devices[0].workloads[0].activity
+        };
+        for tick in 0..6 {
+            label(tick, 80);
+        }
+        assert_eq!(label(6, 0), Activity::Busy);
+        for tick in 7..30 {
+            label(tick, 0);
+        }
+        assert_eq!(label(30, 0), Activity::Idle);
+    }
+
+    #[test]
+    fn labels_do_not_flip_on_a_reading_that_hovers_at_an_edge() {
+        let mut m = calm_model().with_tuning(Tuning {
+            smoothing: Duration::ZERO,
+            lower_dwell: Duration::ZERO,
+            ..Tuning::RAW
+        });
+        let t0 = Instant::now();
+        let mut changes = 0;
+        let mut previous = None;
+        for tick in 0..40u64 {
+            let sm = if tick % 2 == 0 { 4 } else { 5 };
+            feed_at(
+                &mut m,
+                t0 + Duration::from_secs(tick),
+                20,
+                GIB,
+                vec![app("a", 1, GIB, sm)],
+            );
+            let activity = m.devices[0].workloads[0].activity;
+            if previous.is_some_and(|p| p != activity) {
+                changes += 1;
+            }
+            previous = Some(activity);
+        }
+        assert_eq!(changes, 0);
+    }
+
+    #[test]
+    fn an_exited_app_lingers_shrinking_then_disappears() {
+        let mut m = calm_model();
+        let t0 = Instant::now();
+        let both = |sm: u8| vec![app("a", 1, 4 * GIB, sm), app("b", 2, GIB, 10)];
+        for tick in 0..4 {
+            feed_at(
+                &mut m,
+                t0 + Duration::from_secs(tick),
+                60,
+                5 * GIB,
+                both(50),
+            );
+        }
+        let gone_at = t0 + Duration::from_secs(4);
+        feed_at(&mut m, gone_at, 10, GIB, vec![app("b", 2, GIB, 10)]);
+        let device = &m.devices[0];
+        assert_eq!(device.workloads.len(), 2);
+        let ghost = device.workload("a").unwrap();
+        assert!(ghost.exited);
+        assert!(ghost.shown_sm(gone_at) > 10.0);
+        assert_eq!(ghost.shown_sm(gone_at + Duration::from_secs(1)), 0.0);
+        assert_eq!(ghost.shown_mem(gone_at + Duration::from_secs(1)), 0);
+        assert_eq!(device.live().count(), 1);
+        assert_eq!(
+            device.attributed_sm(),
+            u32::from(device.workload("b").unwrap().calm_sm())
+        );
+        assert!(device.frames.back().unwrap().entry(ghost.id).is_none());
+        for tick in 5..7 {
+            feed_at(
+                &mut m,
+                t0 + Duration::from_secs(tick),
+                10,
+                GIB,
+                vec![app("b", 2, GIB, 10)],
+            );
+        }
+        assert!(m.devices[0].workload("a").is_some());
+        feed_at(
+            &mut m,
+            t0 + Duration::from_secs(7),
+            10,
+            GIB,
+            vec![app("b", 2, GIB, 10)],
+        );
+        assert!(m.devices[0].workload("a").is_none());
+    }
+
+    #[test]
+    fn a_ghost_keeps_its_row_while_others_change_rank() {
+        let mut m = calm_model();
+        let t0 = Instant::now();
+        for tick in 0..3 {
+            feed_at(
+                &mut m,
+                t0 + Duration::from_secs(tick),
+                80,
+                3 * GIB,
+                vec![
+                    app("a", 1, GIB, 60),
+                    app("b", 2, GIB, 20),
+                    app("c", 3, GIB, 1),
+                ],
+            );
+        }
+        feed_at(
+            &mut m,
+            t0 + Duration::from_secs(3),
+            25,
+            2 * GIB,
+            vec![app("b", 2, GIB, 20), app("c", 3, GIB, 1)],
+        );
+        let keys: Vec<_> = m.devices[0]
+            .workloads
+            .iter()
+            .map(|w| w.key.clone())
+            .collect();
+        assert_eq!(keys, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_returning_app_replaces_its_ghost() {
+        let mut m = calm_model();
+        let t0 = Instant::now();
+        feed_at(&mut m, t0, 50, GIB, vec![app("a", 1, GIB, 50)]);
+        feed_at(&mut m, t0 + Duration::from_secs(1), 0, 0, vec![]);
+        assert!(m.devices[0].workload("a").unwrap().exited);
+        feed_at(
+            &mut m,
+            t0 + Duration::from_secs(2),
+            50,
+            GIB,
+            vec![app("a", 1, GIB, 50)],
+        );
+        assert_eq!(m.devices[0].workloads.len(), 1);
+        assert!(!m.devices[0].workload("a").unwrap().exited);
+    }
+
+    #[test]
+    fn hardware_readings_are_smoothed() {
+        let mut m = calm_model();
+        let t0 = Instant::now();
+        let mut with_power = |tick: u64, watts: f32| {
+            let mut sample = sample(10, GIB);
+            sample.power_w = Some(watts);
+            m.ingest_at(
+                Observation {
+                    devices: vec![sample],
+                    processes: vec![],
+                },
+                t0 + Duration::from_secs(tick),
+            );
+        };
+        with_power(0, 100.0);
+        with_power(1, 500.0);
+        let shown = m.devices[0].power_avg.unwrap();
+        assert!(shown > 100.0 && shown < 500.0, "{shown}");
     }
 }

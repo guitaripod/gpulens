@@ -11,9 +11,14 @@ use crate::types::{DeviceInfo, DeviceSample};
 
 pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     let device = &app.model.devices[app.device];
-    let Some(sample) = device.sample.as_ref() else {
+    let Some(raw) = device.sample.as_ref() else {
         return;
     };
+    let mut calm = raw.clone();
+    calm.power_w = device.power_avg.map(|v| v as f32);
+    calm.pcie_tx_kbps = device.pcie_tx_avg.map(|v| v.round() as u32);
+    calm.pcie_rx_kbps = device.pcie_rx_avg.map(|v| v.round() as u32);
+    let sample = &calm;
     let mut first = Row::new(buf, area, 0, app);
     first.power(sample, &device.info);
     first.temperature(sample, &device.info);

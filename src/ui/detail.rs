@@ -6,6 +6,7 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Sparkline, Widget};
 
+use super::buckets;
 use super::widgets;
 use crate::app::App;
 use crate::format;
@@ -122,19 +123,28 @@ fn render_text(buf: &mut Buffer, area: Rect, workload: &Workload, app: &App) {
         .sample
         .as_ref()
         .map_or(0, |s| s.mem_total);
+    let shown_mem = workload.shown_mem(app.now);
     let memory = if workload.has_memory_figure() {
         format!(
             "{} ({}% of video memory)",
-            format::bytes(workload.mem_bytes),
-            format::share_pct(workload.mem_bytes, total)
+            format::bytes(shown_mem),
+            format::share_pct(shown_mem, total)
         )
     } else {
         "memory not reported".to_string()
     };
-    let engines = format!("video encode {}%, decode {}%", workload.enc, workload.dec);
+    let engines = format!(
+        "video encode {}%, decode {}%",
+        workload.calm_enc(),
+        workload.calm_dec()
+    );
+    let verb = if workload.exited { "Was" } else { "Now" };
     put(
         buf,
-        &format!("Now: {}% GPU time · {memory} · {engines}", workload.sm),
+        &format!(
+            "{verb}: {:.0}% GPU time · {memory} · {engines}",
+            workload.shown_sm(app.now)
+        ),
         theme.text(),
         &mut y,
     );
@@ -202,6 +212,7 @@ fn render_history(buf: &mut Buffer, area: Rect, workload: &Workload, app: &App) 
     let device = &app.model.devices[app.device];
     let frames = app.window_frames();
     let width = usize::from(area.width);
+    let seqs: Vec<u64> = device.recent_frames(frames).map(|f| f.seq).collect();
     let compute: Vec<u64> = device
         .recent_frames(frames)
         .map(|f| f.entry(workload.id).map_or(0, |e| u64::from(e.sm)))
@@ -228,7 +239,7 @@ fn render_history(buf: &mut Buffer, area: Rect, workload: &Workload, app: &App) 
     );
     let first = Rect::new(area.x, area.y + 1, area.width, 1);
     Sparkline::default()
-        .data(resample(&compute, width))
+        .data(resample(&compute, &seqs, width, frames))
         .max(100)
         .style(style)
         .render(first, buf);
@@ -244,27 +255,22 @@ fn render_history(buf: &mut Buffer, area: Rect, workload: &Workload, app: &App) 
         let max = memory.iter().copied().max().unwrap_or(1).max(1);
         let second = Rect::new(area.x, area.y + 4, area.width, 1);
         Sparkline::default()
-            .data(resample(&memory, width))
+            .data(resample(&memory, &seqs, width, frames))
             .max(max)
             .style(style)
             .render(second, buf);
     }
 }
 
-/// Shrinks a series to `width` points by averaging, so a long window still fits in a short sparkline.
-pub fn resample(values: &[u64], width: usize) -> Vec<u64> {
-    if width == 0 || values.is_empty() {
-        return Vec::new();
-    }
-    if values.len() <= width {
-        return values.to_vec();
-    }
-    (0..width)
-        .map(|i| {
-            let from = i * values.len() / width;
-            let to = ((i + 1) * values.len() / width).max(from + 1);
-            let slice = &values[from..to];
-            slice.iter().sum::<u64>() / slice.len() as u64
+/// Averages each anchored column of the window, so a finished column keeps its value as the window scrolls. Columns with no frames read as zero.
+pub fn resample(values: &[u64], seqs: &[u64], width: usize, window_frames: usize) -> Vec<u64> {
+    buckets::column_ranges(seqs, width, window_frames)
+        .into_iter()
+        .map(|range| {
+            range
+                .and_then(|range| values.get(range))
+                .filter(|slice| !slice.is_empty())
+                .map_or(0, |slice| slice.iter().sum::<u64>() / slice.len() as u64)
         })
         .collect()
 }
@@ -274,10 +280,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resample_averages_buckets() {
-        assert_eq!(resample(&[10, 20, 30, 40], 2), vec![15, 35]);
-        assert_eq!(resample(&[1, 2], 5), vec![1, 2]);
-        assert!(resample(&[], 3).is_empty());
-        assert!(resample(&[1], 0).is_empty());
+    fn resample_averages_each_anchored_column() {
+        let seqs = [0, 1, 2, 3];
+        assert_eq!(resample(&[10, 20, 30, 40], &seqs, 2, 4), vec![15, 35]);
+    }
+
+    #[test]
+    fn resample_keeps_finished_columns_when_the_window_scrolls() {
+        assert_eq!(
+            resample(&[20, 30, 40, 50], &[1, 2, 3, 4], 2, 4),
+            vec![35, 50]
+        );
+    }
+
+    #[test]
+    fn resample_leaves_columns_without_frames_at_zero() {
+        assert_eq!(resample(&[1, 2], &[0, 1], 5, 5), vec![0, 0, 0, 1, 2]);
+    }
+
+    #[test]
+    fn resample_handles_empty_and_zero_width() {
+        assert_eq!(resample(&[], &[], 3, 3), vec![0, 0, 0]);
+        assert!(resample(&[1], &[0], 0, 3).is_empty());
     }
 }

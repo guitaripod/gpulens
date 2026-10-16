@@ -269,3 +269,80 @@ fn several_gpus_show_tabs_and_switch_with_tab() {
     assert!(second.contains("Blender"), "{second}");
     assert_eq!(app.device, 1);
 }
+
+#[test]
+fn an_app_that_just_exited_stays_visible_marked_as_exited() {
+    use std::time::Instant;
+
+    use crate::model::testing::{GIB, identity, observed, sample};
+    use crate::model::{Observation, Tuning};
+    use crate::types::Category;
+
+    let tuning = Tuning {
+        ghost: Duration::from_secs(5),
+        ..Tuning::RAW
+    };
+    let mut model = Model::new(
+        vec![DeviceInfo::default()],
+        Duration::from_secs(1),
+        Duration::from_secs(60),
+    )
+    .with_tuning(tuning);
+    let start = Instant::now();
+    let both = vec![
+        observed(
+            1,
+            identity("game", "Cyber Game", Category::Game),
+            6 * GIB,
+            40,
+        ),
+        observed(
+            2,
+            identity("kde", "Desktop Shell", Category::Desktop),
+            GIB,
+            5,
+        ),
+    ];
+    model.ingest_at(
+        Observation {
+            devices: vec![sample(45, 7 * GIB)],
+            processes: both.clone(),
+        },
+        start,
+    );
+    model.ingest_at(
+        Observation {
+            devices: vec![sample(5, GIB)],
+            processes: vec![both[1].clone()],
+        },
+        start + Duration::from_secs(1),
+    );
+    let mut app = App::new(model, truecolor(), Config::default(), None);
+    app.reconcile_selection();
+    let screen = render(&mut app, 120, 36);
+    assert!(screen.contains("Cyber Game"), "{screen}");
+    assert!(screen.contains("exited"), "{screen}");
+    let live_rows = screen
+        .lines()
+        .filter(|l| l.contains("Desktop Shell"))
+        .count();
+    assert!(live_rows >= 1, "{screen}");
+}
+
+#[test]
+fn the_room_for_the_story_does_not_change_with_its_wording() {
+    let mut app = demo_app(truecolor());
+    let before = render(&mut app, 150, 46);
+    let table_row = |screen: &str| {
+        screen
+            .lines()
+            .position(|l| l.contains("Who is using the GPU"))
+    };
+    app.ai.narration = None;
+    app.backend_error = None;
+    let after = render(&mut app, 150, 46);
+    assert_eq!(table_row(&before), table_row(&after));
+    app.backend_error = Some("x".into());
+    let with_error = render(&mut app, 150, 46);
+    assert_eq!(table_row(&before), table_row(&with_error));
+}

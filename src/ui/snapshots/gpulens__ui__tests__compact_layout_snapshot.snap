@@ -5,8 +5,8 @@ expression: "render(&mut app, 80, 24)"
  gpulens  NVIDIA RTX PRO 6000 Blackwell (demo)  ·  driver 615.… ◆ AI helper off
  The GPU is maxed out (100%). The work is split between vLLM · 3f2a9c (55%),
  ComfyUI (32%) and vLLM · b81c0e (31%).
- GPU   █vLLM · 3f2a9c 55%██▌███████████▍██████████▉██████████▍ 100% busy
- VRAM  █████████████████▍████████████▍████▌████▍██▍▌▏          79.7 / 95.6 GB
+ GPU   █vLLM · 3f2a9c 55%██▌█████████████▎███████▊███████████▋ 100% busy
+ VRAM  █████████████████▍████████████▍██▌▋████▋████▊▏          79.7 / 95.6 GB
 ┌ Who is using the GPU ─────────────────────────────── sort: impact · 11 shown ┐
 │    APP                                       STATE       GPU TIME        VRAM│
 │▶█  vLLM · 3f2a9c                             ● busy      ██▊    55%   30.1 GB│
@@ -19,10 +19,10 @@ expression: "render(&mut app, 80, 24)"
 │    A game running through Steam.                                             │
 │ █  KWin compositor                           ◐ working   ▎       6%    380 MB│
 │    Draws your desktop windows and effects.                                   │
+│ █  llama.cpp server · qwen3-4b               ○ idle 14s  —             5.3 GB│
+│    Serves a large language model; memory stays reserved while it waits for … │
 │ █  Sunshine                                  • light             1%    564 MB│
 │    Game streaming server; encodes your screen for Moonlight.                 │
-│ █  Plasma shell                              • light             1%    210 MB│
-│    The desktop shell: panels, widgets and the app launcher.                  │
 └──────────────────────────────────────────────────────────────────────────────┘
  Power ███████  522/600 W   Temp 78°C   Core clock 2.70 GHz / 3.09 GHz
  q quit  ↑↓ select  s sort: impact  t window: 5m00s  / filter    live · 1000 ms

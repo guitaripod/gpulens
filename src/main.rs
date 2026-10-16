@@ -15,6 +15,7 @@ mod narrate;
 mod procinfo;
 mod sampler;
 mod setup;
+mod smooth;
 mod snapshot;
 mod terminal;
 mod types;
@@ -35,11 +36,12 @@ use crate::classify::Identifier;
 use crate::cli::{Cli, Command, Common};
 use crate::config::Config;
 use crate::event::{Event, Events};
-use crate::model::Model;
+use crate::model::{Model, Tuning};
 use crate::sampler::Sampler;
 use crate::ui::theme::Theme;
 
 const FRAME_WAIT: Duration = Duration::from_millis(250);
+const ANIMATION_WAIT: Duration = Duration::from_millis(33);
 const EVENTS_PER_FRAME: usize = 256;
 
 fn main() -> ExitCode {
@@ -156,7 +158,8 @@ fn run_tui(common: &Common, config: Config) -> Result<()> {
 
     let identifier = Identifier::new(Arc::clone(&catalog));
     let mut sampler = Sampler::new(backend, identifier, ai_handle.clone());
-    let mut model = Model::new(infos, config.interval(), config.history());
+    let mut model =
+        Model::new(infos, config.interval(), config.history()).with_tuning(Tuning::calm());
     if common.demo {
         prefill_demo(&mut model, &mut sampler, &config)?;
     }
@@ -176,13 +179,23 @@ fn run_tui(common: &Common, config: Config) -> Result<()> {
     events.spawn_signals();
 
     while !app.quit {
+        app.now = Instant::now();
+        let animating = app.model.is_animating(app.now);
+        if animating {
+            app.dirty = true;
+        }
         if app.dirty {
             terminal
                 .draw(|frame| ui::draw(frame, &mut app))
                 .context("drawing the interface")?;
             app.dirty = false;
         }
-        if let Some(event) = events.next(FRAME_WAIT) {
+        let wait = if animating {
+            ANIMATION_WAIT
+        } else {
+            FRAME_WAIT
+        };
+        if let Some(event) = events.next(wait) {
             app.handle(event, Instant::now());
             for _ in 0..EVENTS_PER_FRAME {
                 match events.try_next() {

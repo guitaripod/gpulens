@@ -1,49 +1,48 @@
 ---
 source: src/ui/tests.rs
-assertion_line: 52
 expression: "render(&mut app, 150, 46)"
 ---
  gpulens  NVIDIA RTX PRO 6000 Blackwell (demo)  ·  driver 615.71.09                                                                   ◆ AI helper off
  The GPU is maxed out (100%). The work is split between vLLM · 3f2a9c (55%), ComfyUI (32%) and vLLM · b81c0e (31%).
+
   · llama.cpp server · qwen3-4b is idle but still holds 5.3 GB (6% of video memory). Closing it would free that.
- GPU   ██████████████vLLM · 3f2a9c 55%███████████████▌███████ComfyUI 32%████████▌████vLLM · b81c0e 31%████▋██████████████████▎████▎▏ 100% busy
- VRAM  █████████vLLM · 3f2a9c 30.1 GB█████████▍████vLLM · b81c0e 22.7 GB███████████████▊██████████▊██████▊██▊▎█▎                     79.7 / 95.6 GB
+
+ GPU   █vLLM · 3f2a9c 55%████████████████████████████▌█vLLM · b81c0e 31%███████▋████▊▌██████████████████▏█ComfyUI 32%██████████████▏ 100% busy
+ VRAM  █vLLM · 3f2a9c 30.1 GB█████████████████▍█vLLM · b81c0e 22.7 GB██████████████▌█▉▏█████████████████████▊▋█▎                     79.7 / 95.6 GB
 ┌ Who is using the GPU ───────────────────────────────── sort: impact · 11 shown ┐┌ Who used the GPU · last 5m00s ────────────── t window · m metric ┐
 │    APP                                KIND     STATE       GPU TIME        VRAM││ GPU time used                                                    │
-│▶█  vLLM · 3f2a9c                      AI       ● busy      ██▊    55%   30.1 GB││ 100%                        ▄▃   ▁▂▂         ▆▆▇▇▇▇▇▆▆▆▆▆▆▆▆▆▇▇▇ │
-│    Serves a large language model; memory stays reserved while it waits for re… ││                             ▁▄▁▃▂▅█▂▃       ▂███████████████████ │
-│ █  ComfyUI                            AI       ● busy      █▋     32%    9.0 GB││                             ▃▁▃▃█▃▇█▃    ▂  ████████████████████ │
-│    Node-based image and video generation server; keeps models loaded between … ││                             ██▇▂▆███▅▄ ▂▃▂▃▂▃▁█████████▁▂▁▁▃▆▄▅▂ │
-│ █  vLLM · b81c0e                      AI       ● busy      █▌     31%   22.7 GB││                             ▃▄▇██████▆▃▃▄▅▄▂▅▄▃▄▇▇▄▄▅▄▂▄▄▁▁▃█▇██ │
-│    Serves a large language model; memory stays reserved while it waits for re… ││                             █████████▁▂▃▃▃▂▁██▅▅█▇▄▃▆▁▅█████▁██▁ │
-│ █  Counter Strike Global Offensive    Game     ◐ working   █▏     22%    8.4 GB││                             █████▂▄▆▇███████▇▁████████████▁▅▁▂▅█ │
-│    A game running through Steam.                                               ││  50%                        ▂▃▅▆████████████▇▁▄▃▂███▄█▂▇▇▇██████ │
-│ █  KWin compositor                    Desktop  ◐ working   ▎       6%    380 MB││                             █████████████████████▇▄▅▃▂█████████▁ │
-│    Draws your desktop windows and effects.                                     ││                             ██████████████████████████▆▅▅▄▅▇▄▄▆█ │
-│ █  Sunshine                           Video    • light             1%    564 MB││                             ████████████████████████████████████ │
-│    Game streaming server; encodes your screen for Moonlight.                   ││                             ████████████████████████████████████ │
-│ █  Plasma shell                       Desktop  • light             1%    210 MB││                             ████████████████████████████████████ │
-│    The desktop shell: panels, widgets and the app launcher.                    ││    0                        ████████████████████████████████████ │
-│ █  llama.cpp server · qwen3-4b        AI       ○ idle 14s  —             5.3 GB││ Video memory used                                                │
-│    Serves a large language model; memory stays reserved while it waits for re… ││95.6                                                              │
-│ █  Vivaldi                            Browser  ○ idle 45s  —             1.8 GB││                                              ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│    Draws web pages with the GPU.                                               ││                             ▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│ █  Flaccy                             Other    ○ idle 3m   —              97 MB││                             ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│    Desktop app that draws its window with the GPU.                             ││                             ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ │
-│ █  1Password                          Other    ○ idle 3m   —              38 MB││47.8                         ████████████████████████████████████ │
-│    Desktop app that draws its window with the GPU.                             ││                             ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│                                                                                ││                             ████████████████████████████████████ │
-│                                                                                ││                             ████████████████████████████████████ │
-│                                                                                ││    0                        ████████████████████████████████████ │
+│▶█  vLLM · 3f2a9c                      AI       ● busy      ██▊    55%   30.1 GB││ 100%                              ▃   ▁▂        ▅▅▁▁▂▁▆▆▆▆▆▆▆▇▇▇ │
+│    Serves a large language model; memory stays reserved while it waits for re… ││                                   ▃▂▃▃█▂▅      ▂███▇█▅██████████ │
+│ █  ComfyUI                            AI       ● busy      █▋     32%    9.0 GB││                                   ▅▄▅▂▇█▅   ▃▃ ████████████████▁ │
+│    Node-based image and video generation server; keeps models loaded between … ││                                   █▁▅████▄▂▃▄▃▄▁██████▂█▂▄▂▃▇▂▂▄ │
+│ █  vLLM · b81c0e                      AI       ● busy      █▌     31%   22.7 GB││                                   ▆██████▆▄▆▇▇▅▁▂█████▁▂▅▇▄▄████ │
+│    Serves a large language model; memory stays reserved while it waits for re… ││                                   █████▁▃▄▆▆▆▆▅█▄▆▅▄▃▁█▄████▂▃▁▄ │
+│ █  Counter Strike Global Offensive    Game     ◐ working   █▏     22%    8.4 GB││  50%                              █▁▂▅▇███████████▆▃▁█▂█▃▃▃▆▇▅██ │
+│    A game running through Steam.                                               ││                                   ▇████████████████████▂████████ │
+│ █  KWin compositor                    Desktop  ◐ working   ▎       6%    380 MB││                                   ████████████████████▆▇▁▂▂▃▃▁▃▆ │
+│    Draws your desktop windows and effects.                                     ││                                   ██████████████████████████████ │
+│ █  llama.cpp server · qwen3-4b        AI       ○ idle 14s  —             5.3 GB││                                   ██████████████████████████████ │
+│    Serves a large language model; memory stays reserved while it waits for re… ││                                   ██████████████████████████████ │
+│ █  Sunshine                           Video    • light             1%    564 MB││    0                              ██████████████████████████████ │
+│    Game streaming server; encodes your screen for Moonlight.                   ││ Video memory used                                                │
+│ █  Vivaldi                            Browser  ○ idle 45s  —             1.8 GB││95.6                                                              │
+│    Draws web pages with the GPU.                                               ││                                                       ▃▃▃▃▃▃▃▃▃▃ │
+│ █  Plasma shell                       Desktop  • light             1%    210 MB││                                   ▂▂▂▂▂▁▁▁▁▁▁▁▁▂▅▅▅▅▅▅▂▂▂▂▂▂▂▂▂▂ │
+│    The desktop shell: panels, widgets and the app launcher.                    ││                                   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ │
+│ █  Flaccy                             Other    ○ idle 3m   —              97 MB││47.8                               ██████████████████████████████ │
+│    Desktop app that draws its window with the GPU.                             ││                                   ██████████████████████████████ │
+│ █  1Password                          Other    ○ idle 3m   —              38 MB││                                   ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇ │
+│    Desktop app that draws its window with the GPU.                             ││                                   ██████████████████████████████ │
+│                                                                                ││    0                              ██████████████████████████████ │
 │                                                                                ││      -5m00s                                                  now │
-│                                                                                ││ █ vLLM · 3f2a9c  █ ComfyUI  █ vLLM · b81c0e                      │
+│                                                                                ││ █ vLLM · 3f2a9c  █ ComfyUI  █ vLLM · b81c0e  █ KWin compositor   │
 └────────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────┘
 ┌ vLLM · 3f2a9c · AI ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Serves a large language model; memory stays reserved while it waits for requests.                              GPU time · last 5m00s               │
-│ Now: 55% GPU time · 30.1 GB (31% of video memory) · video encode 0%, decode 0%                                 ▃▃▃▃▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▃▃▃▃▃▃▃▃▃▃▃▃▄▄▄ │
+│ Now: 55% GPU time · 30.1 GB (31% of video memory) · video encode 0%, decode 0%                                                ▃▃▄▄▄▄▄▄▄▄▄▄▃▃▃▃▃▃▄▄ │
 │ Docker 3f2a9c1d4b7e · user demo · 1 process                                                                                                        │
 │     PID  USER           VRAM   GPU  COMMAND                                                                    Video memory                        │
-│   41001  demo        30.1 GB   55%  VLLM::EngineCore                                                           ███████████████████████████████████ │
+│   41001  demo        30.1 GB   55%  VLLM::EngineCore                                                                          ████████████████████ │
 │                                                                                                                                                    │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
  Power ███████  522/600 W   Temp 78°C   Core clock 2.70 GHz / 3.09 GHz   Memory clock 13.37 GHz   Fan 70%

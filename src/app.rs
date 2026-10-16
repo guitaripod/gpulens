@@ -30,6 +30,71 @@ const NARRATION_LIFETIME: Duration = Duration::from_secs(90);
 const EXPLANATION_LIFETIME: Duration = Duration::from_secs(180);
 const STALE_AFTER: Duration = Duration::from_secs(5);
 
+/// Holds a value steady until a different one has been on offer for a while, so wording and verdicts do not flip back and forth when a reading hovers around a boundary. The key decides whether the offer is "the same thing"; the value is refreshed whenever the key matches.
+#[derive(Debug)]
+struct Settled<K, V> {
+    shown: Option<(K, V)>,
+    pending: Option<(K, Instant)>,
+}
+
+impl<K: PartialEq + Clone, V> Settled<K, V> {
+    fn new() -> Self {
+        Self {
+            shown: None,
+            pending: None,
+        }
+    }
+
+    fn offer(&mut self, key: K, value: V, now: Instant, dwell: Duration) {
+        let unchanged = self.shown.as_ref().is_none_or(|(shown, _)| *shown == key);
+        if unchanged || dwell.is_zero() {
+            self.shown = Some((key, value));
+            self.pending = None;
+            return;
+        }
+        match &self.pending {
+            Some((waiting, since)) if *waiting == key => {
+                if now.duration_since(*since) >= dwell {
+                    self.shown = Some((key, value));
+                    self.pending = None;
+                }
+            }
+            _ => self.pending = Some((key, now)),
+        }
+    }
+
+    fn value(&self) -> Option<&V> {
+        self.shown.as_ref().map(|(_, value)| value)
+    }
+
+    fn key(&self) -> Option<&K> {
+        self.shown.as_ref().map(|(key, _)| key)
+    }
+}
+
+/// The story with every number blanked out: two stories with the same shape say the same thing.
+fn story_shape(story: &Story) -> String {
+    let mut shape = String::new();
+    let mut previous_was_digit = false;
+    let texts =
+        std::iter::once(story.headline.as_str()).chain(story.notes.iter().map(|n| n.text.as_str()));
+    for text in texts {
+        for ch in text.chars() {
+            if ch.is_ascii_digit() {
+                if !previous_was_digit {
+                    shape.push('#');
+                }
+                previous_was_digit = true;
+            } else {
+                shape.push(ch);
+                previous_was_digit = false;
+            }
+        }
+        shape.push('\n');
+    }
+    shape
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortMode {
     Impact,
@@ -171,6 +236,7 @@ pub struct App {
     pub overlay: Overlay,
     pub paused: bool,
     pub ai: AiState,
+    pub now: Instant,
     pub toast: Option<Toast>,
     pub backend_error: Option<String>,
     pub stale_secs: Option<u64>,
@@ -182,6 +248,8 @@ pub struct App {
     ai_handle: Option<AiHandle>,
     backlog: VecDeque<Observation>,
     last_observation: Option<Instant>,
+    stories: Vec<Settled<String, Story>>,
+    situations: Vec<Settled<u64, u64>>,
 }
 
 impl App {
@@ -212,6 +280,7 @@ impl App {
             overlay: Overlay::None,
             paused: false,
             ai: AiState::new(status),
+            now: Instant::now(),
             toast: None,
             backend_error: None,
             stale_secs: None,
@@ -223,6 +292,8 @@ impl App {
             ai_handle,
             backlog: VecDeque::new(),
             last_observation: None,
+            stories: Vec::new(),
+            situations: Vec::new(),
             config,
         }
     }
@@ -237,8 +308,36 @@ impl App {
             .max(2.0) as usize
     }
 
+    /// The plain-language story as it should be shown: held steady until a different one has persisted for a moment.
     pub fn story(&self) -> Story {
-        narrate::story(&self.model.devices[self.device], self.model.interval)
+        self.stories
+            .get(self.device)
+            .and_then(|settled| settled.value().cloned())
+            .unwrap_or_else(|| {
+                narrate::story(&self.model.devices[self.device], self.model.interval)
+            })
+    }
+
+    /// Runs after every reading: offers the freshly computed story and situation of each GPU to their settlers.
+    fn refresh_calm_state(&mut self, now: Instant) {
+        let dwell = self.model.tuning.settle;
+        while self.stories.len() < self.model.devices.len() {
+            self.stories.push(Settled::new());
+            self.situations.push(Settled::new());
+        }
+        for (position, device) in self.model.devices.iter().enumerate() {
+            let story = narrate::story(device, self.model.interval);
+            self.stories[position].offer(story_shape(&story), story, now, dwell);
+            let signature = narrate::situation_signature(device);
+            self.situations[position].offer(signature, signature, now, dwell);
+        }
+    }
+
+    /// The situation the interface has settled on; AI wording is matched against this rather than the flickering raw value.
+    fn settled_situation(&self) -> Option<u64> {
+        self.situations
+            .get(self.device)
+            .and_then(|s| s.key().copied())
     }
 
     /// The model-written headline, but only while it still describes the current situation and is recent enough that its numbers can be trusted.
@@ -246,7 +345,7 @@ impl App {
         if !self.ai_wording {
             return None;
         }
-        let current = narrate::situation_signature(&self.model.devices[self.device]);
+        let current = self.settled_situation()?;
         self.ai
             .narration
             .as_ref()
@@ -273,14 +372,11 @@ impl App {
             .collect();
         match self.sort {
             SortMode::Impact => {}
-            SortMode::Memory => rows.sort_by_key(|w| std::cmp::Reverse(w.mem_bytes)),
+            SortMode::Memory => {
+                rows.sort_by_key(|w| std::cmp::Reverse(w.shown_mem(self.now)));
+            }
             SortMode::Name => rows.sort_by_key(|w| w.display_name.to_lowercase()),
-            SortMode::Kind => rows.sort_by(|a, b| {
-                a.category()
-                    .cmp(&b.category())
-                    .then(b.sm.cmp(&a.sm))
-                    .then(b.mem_bytes.cmp(&a.mem_bytes))
-            }),
+            SortMode::Kind => rows.sort_by_key(|w| w.category()),
         }
         rows
     }
@@ -340,7 +436,8 @@ impl App {
             }
             return;
         }
-        self.model.ingest(observation);
+        self.model.ingest_at(observation, now);
+        self.refresh_calm_state(now);
         self.reconcile_selection();
         self.request_narration(now);
         self.dirty = true;
@@ -350,8 +447,9 @@ impl App {
         self.paused = paused;
         if !paused {
             for observation in std::mem::take(&mut self.backlog) {
-                self.model.ingest(observation);
+                self.model.ingest_at(observation, now);
             }
+            self.refresh_calm_state(now);
             self.reconcile_selection();
             self.request_narration(now);
         }
@@ -519,6 +617,11 @@ impl App {
         let Some(workload) = self.selected() else {
             return;
         };
+        if workload.exited {
+            let message = format!("{} has already exited.", workload.display_name);
+            self.notify(message, Level::Info, now);
+            return;
+        }
         let refusal = refusal_reason(workload.category(), &workload.display_name);
         self.overlay = Overlay::ConfirmKill(KillPrompt {
             name: workload.display_name.clone(),
@@ -656,7 +759,9 @@ impl App {
             return;
         }
         let device = &self.model.devices[self.device];
-        let situation = narrate::situation_signature(device);
+        let Some(situation) = self.settled_situation() else {
+            return;
+        };
         if self
             .ai
             .narration
@@ -1049,6 +1154,190 @@ mod tests {
             },
         );
         assert_eq!(a.explanation_for("b"), Some("fresh"));
+    }
+
+    struct NoisyScenario {
+        seed: u64,
+    }
+
+    impl NoisyScenario {
+        fn noise(&mut self, amplitude: i32) -> i32 {
+            self.seed = self
+                .seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.seed >> 33) as i32 % (2 * amplitude + 1)) - amplitude
+        }
+
+        fn load(&mut self, base: i32, amplitude: i32) -> u8 {
+            (base + self.noise(amplitude)).clamp(0, 100) as u8
+        }
+
+        fn tick(&mut self, index: usize) -> Observation {
+            let drift = if index < 300 { 3 } else { 1 };
+            let loads = [
+                self.load(45, 8),
+                self.load(41, 8),
+                self.load(12, 6),
+                self.load(4, 3),
+                0,
+                0,
+                self.load(drift, 3),
+            ];
+            let names = [
+                "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf",
+            ];
+            let memory = [8, 6, 2, 1, 3, 1, 2];
+            let processes: Vec<_> = loads
+                .iter()
+                .enumerate()
+                .map(|(i, load)| {
+                    observed(
+                        i as u32 + 1,
+                        identity(names[i], names[i], Category::Other),
+                        memory[i] * GIB,
+                        *load,
+                    )
+                })
+                .collect();
+            let busy: u32 = loads.iter().map(|l| u32::from(*l)).sum::<u32>() + 2;
+            Observation {
+                devices: vec![sample(busy.min(100) as u8, 23 * GIB)],
+                processes,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Jitter {
+        row_moves: usize,
+        label_changes: usize,
+        story_changes: usize,
+    }
+
+    fn measure(tuning: crate::model::Tuning) -> Jitter {
+        let model = Model::new(
+            vec![DeviceInfo::default()],
+            Duration::from_secs(1),
+            Duration::from_secs(900),
+        )
+        .with_tuning(tuning);
+        let mut a = App::new(
+            model,
+            Theme::new(crate::ui::theme::ColorMode::TrueColor, false, false),
+            Config::default(),
+            None,
+        );
+        let mut scenario = NoisyScenario { seed: 7 };
+        let start = Instant::now();
+        let mut jitter = Jitter::default();
+        let mut previous_order: Vec<String> = Vec::new();
+        let mut previous_labels: HashMap<String, &'static str> = HashMap::new();
+        let mut previous_shape = String::new();
+        for index in 0..600 {
+            let now = start + Duration::from_secs(index as u64);
+            a.handle(Event::Observation(Box::new(scenario.tick(index))), now);
+            if index < 20 {
+                previous_order = a.visible().iter().map(|w| w.key.clone()).collect();
+                previous_labels = a
+                    .visible()
+                    .iter()
+                    .map(|w| (w.key.clone(), w.activity.label()))
+                    .collect();
+                previous_shape = story_shape(&a.story());
+                continue;
+            }
+            let order: Vec<String> = a.visible().iter().map(|w| w.key.clone()).collect();
+            jitter.row_moves += order
+                .iter()
+                .zip(&previous_order)
+                .filter(|(x, y)| x != y)
+                .count();
+            previous_order = order;
+            for workload in a.visible() {
+                if previous_labels.insert(workload.key.clone(), workload.activity.label())
+                    != Some(workload.activity.label())
+                {
+                    jitter.label_changes += 1;
+                }
+            }
+            let shape = story_shape(&a.story());
+            if shape != previous_shape {
+                jitter.story_changes += 1;
+                previous_shape = shape;
+            }
+        }
+        jitter
+    }
+
+    #[test]
+    fn calm_tuning_removes_most_of_the_jitter_on_noisy_readings() {
+        let raw = measure(crate::model::Tuning::RAW);
+        let calm = measure(crate::model::Tuning::calm());
+        assert!(
+            raw.row_moves > 100,
+            "the scenario must actually be noisy: {}",
+            raw.row_moves
+        );
+        assert!(
+            calm.row_moves * 5 <= raw.row_moves,
+            "rows moved {} vs {}",
+            calm.row_moves,
+            raw.row_moves
+        );
+        assert!(
+            calm.label_changes * 3 <= raw.label_changes,
+            "labels {} vs {}",
+            calm.label_changes,
+            raw.label_changes
+        );
+        assert!(
+            calm.story_changes * 3 <= raw.story_changes,
+            "stories {} vs {}",
+            calm.story_changes,
+            raw.story_changes
+        );
+    }
+
+    #[test]
+    fn an_exited_app_cannot_be_stopped() {
+        use crate::model::Tuning;
+        let model = Model::new(
+            vec![DeviceInfo::default()],
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+        )
+        .with_tuning(Tuning {
+            ghost: Duration::from_secs(5),
+            ..Tuning::RAW
+        });
+        let mut a = App::new(
+            model,
+            Theme::new(crate::ui::theme::ColorMode::TrueColor, false, false),
+            Config::default(),
+            None,
+        );
+        let now = Instant::now();
+        feed_three(&mut a);
+        a.handle(
+            Event::Observation(Box::new(Observation {
+                devices: vec![sample(5, GIB)],
+                processes: vec![observed(
+                    3,
+                    identity("c", "Gamma", Category::Desktop),
+                    GIB,
+                    2,
+                )],
+            })),
+            now,
+        );
+        a.handle(key(KeyCode::Char('x')), now);
+        assert!(matches!(a.overlay, Overlay::None));
+        assert!(
+            a.toast
+                .as_ref()
+                .is_some_and(|t| t.text.contains("already exited"))
+        );
     }
 
     #[test]
