@@ -83,6 +83,8 @@ fn badges(app: &App) -> (String, Style) {
         (format!("PAUSED · {every} "), theme.warn())
     } else if app.backend_error.is_some() {
         ("NO SIGNAL ".to_string(), theme.bad())
+    } else if let Some(secs) = app.stale_secs {
+        (format!("NO NEW DATA FOR {secs}s "), theme.bad())
     } else {
         (format!("live · {every} "), theme.good())
     }

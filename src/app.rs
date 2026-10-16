@@ -27,6 +27,7 @@ pub const WINDOWS: [Duration; 4] = [
 const INTERVALS_MS: [u64; 6] = [250, 500, 1000, 2000, 5000, 10000];
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
 const BACKLOG_LIMIT: usize = 600;
+const STALE_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortMode {
@@ -164,12 +165,14 @@ pub struct App {
     pub ai: AiState,
     pub toast: Option<Toast>,
     pub backend_error: Option<String>,
+    pub stale_secs: Option<u64>,
     pub quit: bool,
     pub dirty: bool,
     pub hitboxes: Hitboxes,
     pub commands: Vec<Command>,
     ai_handle: Option<AiHandle>,
     backlog: Vec<Observation>,
+    last_observation: Option<Instant>,
 }
 
 impl App {
@@ -202,12 +205,14 @@ impl App {
             ai: AiState::new(status),
             toast: None,
             backend_error: None,
+            stale_secs: None,
             quit: false,
             dirty: true,
             hitboxes: Hitboxes::default(),
             commands: Vec::new(),
             ai_handle,
             backlog: Vec::new(),
+            last_observation: None,
             config,
         }
     }
@@ -286,10 +291,26 @@ impl App {
             self.toast = None;
             self.dirty = true;
         }
+        self.update_staleness(now);
+    }
+
+    /// Flags readings that have stopped arriving, so a frozen picture is never mistaken for a calm GPU.
+    fn update_staleness(&mut self, now: Instant) {
+        let threshold = (self.model.interval * 3).max(STALE_AFTER);
+        let stale = self
+            .last_observation
+            .map(|at| now.duration_since(at))
+            .filter(|age| *age > threshold)
+            .map(|age| age.as_secs());
+        if stale != self.stale_secs {
+            self.stale_secs = stale;
+            self.dirty = true;
+        }
     }
 
     fn on_observation(&mut self, observation: Observation, now: Instant) {
         self.backend_error = None;
+        self.last_observation = Some(now);
         if self.paused {
             if self.backlog.len() < BACKLOG_LIMIT {
                 self.backlog.push(observation);
@@ -859,6 +880,32 @@ mod tests {
             a.handle(key(KeyCode::Char('-')), now);
         }
         assert_eq!(a.model.interval, Duration::from_millis(10000));
+    }
+
+    #[test]
+    fn missing_readings_are_flagged_as_stale() {
+        let mut a = app();
+        let start = Instant::now();
+        a.handle(
+            Event::Observation(Box::new(Observation {
+                devices: vec![sample(10, GIB)],
+                processes: vec![],
+            })),
+            start,
+        );
+        a.tick(start + Duration::from_secs(2));
+        assert_eq!(a.stale_secs, None);
+        a.tick(start + Duration::from_secs(12));
+        assert_eq!(a.stale_secs, Some(12));
+        a.handle(
+            Event::Observation(Box::new(Observation {
+                devices: vec![sample(10, GIB)],
+                processes: vec![],
+            })),
+            start + Duration::from_secs(13),
+        );
+        a.tick(start + Duration::from_secs(14));
+        assert_eq!(a.stale_secs, None);
     }
 
     #[test]
