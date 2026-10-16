@@ -7,7 +7,7 @@ use ratatui::style::Style;
 use super::widgets;
 use crate::app::App;
 use crate::format;
-use crate::types::{DeviceInfo, DeviceSample};
+use crate::types::{DeviceInfo, DeviceSample, Throttle};
 
 pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     let device = &app.model.devices[app.device];
@@ -18,6 +18,10 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     calm.power_w = device.power_avg.map(|v| v as f32);
     calm.pcie_tx_kbps = device.pcie_tx_avg.map(|v| v.round() as u32);
     calm.pcie_rx_kbps = device.pcie_rx_avg.map(|v| v.round() as u32);
+    calm.throttle = Throttle {
+        unknown: raw.throttle.unknown,
+        ..device.calm_throttle
+    };
     let sample = &calm;
     let mut first = Row::new(buf, area, 0, app);
     first.power(sample, &device.info);

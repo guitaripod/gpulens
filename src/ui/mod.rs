@@ -23,7 +23,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let story = app.story();
     let view = header::story_view(app, &story);
-    let needs = header::needs(area.width, area.height);
+    let cap = header::needs(area.width, area.height);
+    let needs = app
+        .room
+        .fit(header::wanted(&view, area.width), cap, app.now);
     let Some(regions) = layout::regions(area, needs) else {
         app.too_small = true;
         overlay::render_too_small(frame.buffer_mut(), area, app);

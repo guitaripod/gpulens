@@ -60,6 +60,19 @@ gpulens doctor          # check everything gpulens relies on
 
 Colours follow the terminal's capabilities (truecolor, 256, 16, or none with `NO_COLOR` or `--no-color`) and use a colour-blind-safe palette. `--ascii` draws with plain characters for terminals without Unicode. The layout adapts down to 60×14.
 
+## Why it stays calm
+
+Raw GPU readings twitch every second. gpulens is built so the picture does not:
+
+- Numbers are smoothed over about a second and a half, and the bars glide between readings instead of jumping.
+- Rows keep their order. An app only moves up when it is clearly ahead of the one above it, so two similar apps do not trade places.
+- State labels (busy, working, light, idle) need a clear margin to climb and a few seconds below it to fall.
+- The headline and findings only change wording after the new wording has held for a moment. The room they occupy grows at once when needed but only shrinks after half a minute of quiet, so the panels below them rarely shift.
+- Bar segments keep their colour order. The history chart is anchored to absolute time, so it scrolls instead of shimmering.
+- An app that exits stays in the list for a few seconds, shrinking and marked "exited", instead of its row vanishing.
+
+Set `calm = false` or `animate = false` in the config if you prefer raw readings or no motion.
+
 ## What the numbers mean
 
 - **GPU time** per app is NVML's per-process SM utilisation, averaged over the sampling window. A process that did nothing reports nothing, so it shows as idle. The total can be lower than the card's overall busy figure; the difference is shown as "unclaimed" (other users, containers whose processes the driver cannot attribute, driver work).
@@ -93,6 +106,8 @@ history_secs = 3600
 window_secs = 300         # starting history window
 ascii = false
 allow_kill = true         # set false to remove the stop action entirely
+calm = true               # smooth readings, keep row order steady, debounce labels and wording
+animate = true            # glide bars and numbers between readings (false for reduced motion)
 
 [llm]
 enabled = true

@@ -6,6 +6,7 @@ use std::panic;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 
 /// Restores the terminal when dropped, whatever way the program ends.
 pub struct TerminalGuard;
@@ -19,6 +20,17 @@ impl Drop for TerminalGuard {
 fn restore() {
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
+}
+
+/// Draws one frame inside a synchronized-update bracket, so terminals that support it show the whole frame at once instead of tearing while bars glide. Terminals that do not know the sequence ignore it.
+pub fn draw_synchronized<F>(terminal: &mut DefaultTerminal, render: F) -> io::Result<()>
+where
+    F: FnOnce(&mut ratatui::Frame),
+{
+    let _ = execute!(io::stdout(), BeginSynchronizedUpdate);
+    let result = terminal.draw(render).map(|_| ());
+    let _ = execute!(io::stdout(), EndSynchronizedUpdate);
+    result
 }
 
 /// Enters the alternate screen with mouse support. A panic on the main thread restores the terminal before printing; a panic on a helper thread must not tear the screen down under a still-running interface, so it is written to a log file instead.

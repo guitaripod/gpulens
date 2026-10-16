@@ -268,7 +268,7 @@ fn memory_pressure_note(device: &DeviceView) -> Option<Note> {
 
 fn heat_note(device: &DeviceView) -> Option<Note> {
     let sample = device.sample.as_ref()?;
-    if sample.throttle.thermal {
+    if device.calm_throttle.thermal {
         let temp = sample
             .temp_c
             .map(|t| format!(" ({t}°C)"))
@@ -278,7 +278,7 @@ fn heat_note(device: &DeviceView) -> Option<Note> {
             format!("The GPU is running hot{temp} and slowing itself down to cool off."),
         );
     }
-    if sample.throttle.hardware {
+    if device.calm_throttle.hardware {
         return note(
             Level::Warn,
             "The GPU's hardware is slowing it down (heat, or a power brake from outside the card)."
@@ -290,7 +290,7 @@ fn heat_note(device: &DeviceView) -> Option<Note> {
 
 fn power_note(device: &DeviceView, util: u8) -> Option<Note> {
     let sample = device.sample.as_ref()?;
-    if !sample.throttle.power || util < 50 {
+    if !device.calm_throttle.power || util < 50 {
         return None;
     }
     let detail = match (sample.power_w, sample.power_limit_w) {
@@ -427,7 +427,7 @@ pub fn situation_signature(device: &DeviceView) -> u64 {
     if let Some(sample) = device.sample.as_ref() {
         (device.calm_util() / 25).hash(&mut hasher);
         (format::share_pct(sample.mem_used, sample.mem_total) / 10).hash(&mut hasher);
-        sample.throttle.is_limited().hash(&mut hasher);
+        device.calm_throttle.is_limited().hash(&mut hasher);
     }
     let mut leaders: Vec<&Workload> = device
         .live()
@@ -902,9 +902,8 @@ mod tests {
     fn thermal_throttling_says_the_gpu_is_running_hot() {
         let mut m = model();
         feed(&mut m, 90, 10 * GIB, vec![]);
-        let sample = m.devices[0].sample.as_mut().unwrap();
-        sample.throttle.thermal = true;
-        sample.temp_c = Some(87);
+        m.devices[0].calm_throttle.thermal = true;
+        m.devices[0].sample.as_mut().unwrap().temp_c = Some(87);
         let notes = story(&m.devices[0], m.interval).notes;
         assert!(notes.iter().any(|n| n.level == Level::Warn
             && n.text == "The GPU is running hot (87°C) and slowing itself down to cool off."));
@@ -914,7 +913,7 @@ mod tests {
     fn hardware_slowdown_without_heat_is_not_called_hot() {
         let mut m = model();
         feed(&mut m, 90, 10 * GIB, vec![]);
-        m.devices[0].sample.as_mut().unwrap().throttle.hardware = true;
+        m.devices[0].calm_throttle.hardware = true;
         let notes = story(&m.devices[0], m.interval).notes;
         assert!(notes.iter().any(|n| n.level == Level::Warn
             && n.text

@@ -158,8 +158,8 @@ fn run_tui(common: &Common, config: Config) -> Result<()> {
 
     let identifier = Identifier::new(Arc::clone(&catalog));
     let mut sampler = Sampler::new(backend, identifier, ai_handle.clone());
-    let mut model =
-        Model::new(infos, config.interval(), config.history()).with_tuning(Tuning::calm());
+    let mut model = Model::new(infos, config.interval(), config.history())
+        .with_tuning(Tuning::for_interface(config.calm, config.animate));
     if common.demo {
         prefill_demo(&mut model, &mut sampler, &config)?;
     }
@@ -185,8 +185,7 @@ fn run_tui(common: &Common, config: Config) -> Result<()> {
             app.dirty = true;
         }
         if app.dirty {
-            terminal
-                .draw(|frame| ui::draw(frame, &mut app))
+            terminal::draw_synchronized(&mut terminal, |frame| ui::draw(frame, &mut app))
                 .context("drawing the interface")?;
             app.dirty = false;
         }

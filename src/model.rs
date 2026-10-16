@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::smooth::{Tween, blend, ema_alpha};
-use crate::types::{Category, DeviceInfo, DeviceSample, GpuProcess, Identity, ProcMeta};
+use crate::types::{
+    Category, DeviceInfo, DeviceSample, GpuProcess, Identity, Pid, ProcMeta, Throttle,
+};
 
 pub const COLOR_SLOTS: u8 = 8;
 const IMPORTANCE_WINDOW: Duration = Duration::from_secs(300);
@@ -34,6 +36,19 @@ impl Tuning {
         lower_dwell: Duration::ZERO,
         settle: Duration::ZERO,
     };
+
+    /// The interface's settings: `calm` turns on smoothing and stable ordering, `animate` turns on the glides between readings.
+    pub fn for_interface(calm: bool, animate: bool) -> Tuning {
+        let base = if calm { Self::calm() } else { Self::RAW };
+        Tuning {
+            tween: if animate {
+                Self::calm().tween
+            } else {
+                Duration::ZERO
+            },
+            ..base
+        }
+    }
 
     pub const fn calm() -> Tuning {
         Tuning {
@@ -153,6 +168,7 @@ pub struct Workload {
     pub sm_avg: f64,
     pub enc_avg: f64,
     pub dec_avg: f64,
+    pub proc_sm_avg: HashMap<Pid, f64>,
     pub mem_bytes: u64,
     pub activity: Activity,
     pub idle_ticks: u32,
@@ -181,6 +197,19 @@ impl Workload {
 
     pub fn calm_dec(&self) -> u8 {
         percent(self.dec_avg)
+    }
+
+    /// One process's smoothed GPU time, falling back to its raw reading when it has not been averaged yet.
+    pub fn proc_calm_sm(&self, pid: Pid) -> u8 {
+        self.proc_sm_avg.get(&pid).map_or_else(
+            || {
+                self.procs
+                    .iter()
+                    .find(|p| p.proc.pid == pid)
+                    .map_or(0, |p| p.proc.util.sm)
+            },
+            |avg| percent(*avg),
+        )
     }
 
     pub fn shown_sm(&self, now: Instant) -> f64 {
@@ -226,6 +255,8 @@ pub struct DeviceView {
     pub power_avg: Option<f64>,
     pub pcie_tx_avg: Option<f64>,
     pub pcie_rx_avg: Option<f64>,
+    pub calm_throttle: Throttle,
+    throttle_off_ticks: [u32; 4],
     next_seq: u64,
     tracks: HashMap<WorkloadId, Track>,
     order: Vec<WorkloadId>,
@@ -246,6 +277,7 @@ struct Track {
     impact: f64,
     mem: u64,
     shown: Shown,
+    pid_sm: HashMap<Pid, f64>,
     last: Option<Workload>,
 }
 
@@ -260,6 +292,8 @@ impl DeviceView {
             power_avg: None,
             pcie_tx_avg: None,
             pcie_rx_avg: None,
+            calm_throttle: Throttle::default(),
+            throttle_off_ticks: [0; 4],
             next_seq: 0,
             tracks: HashMap::new(),
             order: Vec::new(),
@@ -544,6 +578,18 @@ impl Model {
                 now,
                 span,
             );
+            track
+                .pid_sm
+                .retain(|pid, _| workload.procs.iter().any(|p| p.proc.pid == *pid));
+            for observed in &workload.procs {
+                let reading = f64::from(observed.proc.util.sm);
+                track
+                    .pid_sm
+                    .entry(observed.proc.pid)
+                    .and_modify(|avg| *avg = blend(*avg, reading, alpha))
+                    .or_insert(reading);
+            }
+            workload.proc_sm_avg = track.pid_sm.clone();
             workload.sm_avg = track.sm_avg;
             workload.enc_avg = track.enc_avg;
             workload.dec_avg = track.dec_avg;
@@ -636,6 +682,7 @@ impl Model {
     fn smooth_device(&mut self, position: usize, sample: &DeviceSample, now: Instant) {
         let alpha = ema_alpha(self.interval, self.tuning.smoothing);
         let span = self.tween_span();
+        let dwell = ticks_for(self.tuning.lower_dwell, self.interval);
         let device = &mut self.devices[position];
         let first = device.sample.is_none();
         let raw = f64::from(sample.gpu_util);
@@ -654,6 +701,12 @@ impl Model {
             device.pcie_rx_avg,
             sample.pcie_rx_kbps.map(f64::from),
             alpha,
+        );
+        device.calm_throttle = hold_throttle(
+            device.calm_throttle,
+            sample.throttle,
+            &mut device.throttle_off_ticks,
+            dwell,
         );
         device.util_tween.retarget(device.util_avg, now, span);
         device
@@ -728,6 +781,7 @@ impl Model {
             sm_avg: f64::from(sm),
             enc_avg: f64::from(enc),
             dec_avg: f64::from(dec),
+            proc_sm_avg: HashMap::new(),
             mem_bytes,
             activity: Activity::from_util(sm, enc, dec),
             idle_ticks: 0,
@@ -854,6 +908,7 @@ impl Track {
             impact: 0.0,
             mem: 0,
             shown: Shown::settled(0.0, 0.0, 0.0, 0.0, now),
+            pid_sm: HashMap::new(),
             last: None,
         }
     }
@@ -897,6 +952,28 @@ fn debounce(current: Activity, target: Activity, below: &mut u32, dwell: u32) ->
         target
     } else {
         current
+    }
+}
+
+/// A throttle reason shows up at once but only clears after it has been gone for the dwell time, so a limiter that flickers on and off reads as one steady condition.
+fn hold_throttle(shown: Throttle, now: Throttle, off_ticks: &mut [u32; 4], dwell: u32) -> Throttle {
+    let mut hold = |index: usize, shown_flag: bool, now_flag: bool| -> bool {
+        if now_flag {
+            off_ticks[index] = 0;
+            return true;
+        }
+        if !shown_flag {
+            return false;
+        }
+        off_ticks[index] += 1;
+        off_ticks[index] < dwell
+    };
+    Throttle {
+        idle: hold(0, shown.idle, now.idle),
+        power: hold(1, shown.power, now.power),
+        thermal: hold(2, shown.thermal, now.thermal),
+        hardware: hold(3, shown.hardware, now.hardware),
+        unknown: now.unknown,
     }
 }
 
@@ -1623,6 +1700,56 @@ mod calm_tests {
         );
         assert_eq!(m.devices[0].workloads.len(), 1);
         assert!(!m.devices[0].workload("a").unwrap().exited);
+    }
+
+    #[test]
+    fn a_flickering_limiter_reads_as_one_steady_condition() {
+        let mut m = calm_model();
+        let t0 = Instant::now();
+        let mut limited = |tick: u64, on: bool| {
+            let mut sample = sample(80, GIB);
+            sample.throttle.power = on;
+            m.ingest_at(
+                Observation {
+                    devices: vec![sample],
+                    processes: vec![],
+                },
+                t0 + Duration::from_secs(tick),
+            );
+            m.devices[0].calm_throttle.power
+        };
+        assert!(limited(0, true));
+        assert!(limited(1, false));
+        assert!(limited(2, true));
+        assert!(limited(3, false));
+        assert!(!limited(5, false));
+    }
+
+    #[test]
+    fn process_figures_are_smoothed_too() {
+        let mut m = calm_model();
+        let t0 = Instant::now();
+        feed_at(&mut m, t0, 10, GIB, vec![app("a", 7, GIB, 10)]);
+        feed_at(
+            &mut m,
+            t0 + Duration::from_secs(1),
+            90,
+            GIB,
+            vec![app("a", 7, GIB, 90)],
+        );
+        let w = &m.devices[0].workloads[0];
+        let calm = w.proc_calm_sm(7);
+        assert!(calm > 10 && calm < 90, "{calm}");
+        assert_eq!(w.proc_calm_sm(999), 0);
+    }
+
+    #[test]
+    fn interface_tuning_switches_follow_the_config() {
+        let calm = Tuning::for_interface(true, true);
+        assert!(!calm.smoothing.is_zero() && !calm.tween.is_zero());
+        let still = Tuning::for_interface(true, false);
+        assert!(!still.smoothing.is_zero() && still.tween.is_zero());
+        assert_eq!(Tuning::for_interface(false, false), Tuning::RAW);
     }
 
     #[test]

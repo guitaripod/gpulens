@@ -63,7 +63,7 @@ pub fn story_view(app: &App, story: &Story) -> StoryView {
     }
 }
 
-/// How much room the story block always reserves. It depends only on the window size, never on the text, so the panels below never shift when the wording changes.
+/// The most room the story block may ever take. It depends only on the window size.
 pub fn needs(width: u16, height: u16) -> StoryNeeds {
     let usable = usize::from(width.saturating_sub(4)).max(1);
     let lines = NOMINAL_HEADLINE_WIDTH.div_ceil(usable).clamp(1, 2) as u16;
@@ -76,6 +76,16 @@ pub fn needs(width: u16, height: u16) -> StoryNeeds {
     StoryNeeds {
         headline_lines: lines,
         note_lines,
+    }
+}
+
+/// How many lines the current wording would like.
+pub fn wanted(view: &StoryView, width: u16) -> StoryNeeds {
+    let usable = usize::from(width.saturating_sub(4)).max(1);
+    let lines = (view.headline.width() + 2).div_ceil(usable).clamp(1, 2) as u16;
+    StoryNeeds {
+        headline_lines: lines,
+        note_lines: view.notes.len().min(usize::from(u16::MAX)) as u16,
     }
 }
 
@@ -105,7 +115,7 @@ pub fn render_title(buf: &mut Buffer, area: Rect, app: &App) {
             left_limit.saturating_sub(x),
         );
         for (index, other) in app.model.devices.iter().enumerate() {
-            let util = other.sample.as_ref().map_or(0, |s| s.gpu_util);
+            let util = other.calm_util();
             let label = format!(" {} {} {util}% ", index + 1, short_name(&other.info.name));
             let style = if index == app.device {
                 theme.selected()
@@ -406,6 +416,19 @@ mod tests {
         let items = memory_items(&m.devices[0], Instant::now());
         let names: Vec<_> = items.iter().map(|(_, n)| n.as_str()).collect();
         assert_eq!(names, vec!["Big 9.0 GB", "Small 1.0 GB", "reserved 2.0 GB"]);
+    }
+
+    #[test]
+    fn wanted_room_follows_the_wording() {
+        let view = |headline: &str, notes: usize| StoryView {
+            headline: headline.to_string(),
+            ai_written: false,
+            notes: vec![(Level::Info, "n".to_string()); notes],
+            is_error: false,
+        };
+        assert_eq!(wanted(&view("short", 2), 100).headline_lines, 1);
+        assert_eq!(wanted(&view(&"x".repeat(150), 0), 100).headline_lines, 2);
+        assert_eq!(wanted(&view("short", 3), 100).note_lines, 3);
     }
 
     #[test]

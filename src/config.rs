@@ -29,6 +29,8 @@ pub struct Config {
     pub window_secs: u64,
     pub ascii: bool,
     pub allow_kill: bool,
+    pub calm: bool,
+    pub animate: bool,
     pub llm: LlmConfig,
 }
 
@@ -73,6 +75,8 @@ impl Default for Config {
             window_secs: 300,
             ascii: false,
             allow_kill: true,
+            calm: true,
+            animate: true,
             llm: LlmConfig::default(),
         }
     }

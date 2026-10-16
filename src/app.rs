@@ -16,6 +16,7 @@ use crate::event::Event;
 use crate::model::{Model, Observation, Workload};
 use crate::narrate::{self, Level, Story};
 use crate::types::{Category, ProcMeta};
+use crate::ui::layout::StoryNeeds;
 use crate::ui::theme::Theme;
 
 pub const WINDOWS: [Duration; 4] = [
@@ -69,6 +70,59 @@ impl<K: PartialEq + Clone, V> Settled<K, V> {
 
     fn key(&self) -> Option<&K> {
         self.shown.as_ref().map(|(key, _)| key)
+    }
+}
+
+const ROOM_SHRINK_AFTER: Duration = Duration::from_secs(30);
+
+/// How much room the story block holds on to. It grows the moment the wording needs more, but only gives space back after a long quiet spell, so the panels below it move rarely and then only once.
+#[derive(Debug)]
+pub struct RoomHold {
+    headline: u16,
+    headline_needed_at: Instant,
+    notes: u16,
+    notes_needed_at: Instant,
+}
+
+impl RoomHold {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            headline: 1,
+            headline_needed_at: now,
+            notes: 0,
+            notes_needed_at: now,
+        }
+    }
+
+    pub fn fit(&mut self, wanted: StoryNeeds, cap: StoryNeeds, now: Instant) -> StoryNeeds {
+        hold_room(
+            &mut self.headline,
+            &mut self.headline_needed_at,
+            wanted.headline_lines.max(1),
+            now,
+        );
+        hold_room(
+            &mut self.notes,
+            &mut self.notes_needed_at,
+            wanted.note_lines,
+            now,
+        );
+        self.headline = self.headline.min(cap.headline_lines.max(1));
+        self.notes = self.notes.min(cap.note_lines);
+        StoryNeeds {
+            headline_lines: self.headline,
+            note_lines: self.notes,
+        }
+    }
+}
+
+fn hold_room(reserved: &mut u16, needed_at: &mut Instant, needed: u16, now: Instant) {
+    if needed >= *reserved {
+        *reserved = needed;
+        *needed_at = now;
+    } else if now.saturating_duration_since(*needed_at) >= ROOM_SHRINK_AFTER {
+        *reserved -= 1;
+        *needed_at = now;
     }
 }
 
@@ -237,6 +291,7 @@ pub struct App {
     pub paused: bool,
     pub ai: AiState,
     pub now: Instant,
+    pub room: RoomHold,
     pub toast: Option<Toast>,
     pub backend_error: Option<String>,
     pub stale_secs: Option<u64>,
@@ -281,6 +336,7 @@ impl App {
             paused: false,
             ai: AiState::new(status),
             now: Instant::now(),
+            room: RoomHold::new(Instant::now()),
             toast: None,
             backend_error: None,
             stale_secs: None,
@@ -1338,6 +1394,36 @@ mod tests {
                 .as_ref()
                 .is_some_and(|t| t.text.contains("already exited"))
         );
+    }
+
+    #[test]
+    fn story_room_grows_at_once_and_shrinks_only_after_a_long_quiet_spell() {
+        let t0 = Instant::now();
+        let mut room = RoomHold::new(t0);
+        let cap = StoryNeeds {
+            headline_lines: 2,
+            note_lines: 3,
+        };
+        let want = |h, n| StoryNeeds {
+            headline_lines: h,
+            note_lines: n,
+        };
+        let fitted = room.fit(want(1, 0), cap, t0);
+        assert_eq!((fitted.headline_lines, fitted.note_lines), (1, 0));
+        let fitted = room.fit(want(2, 2), cap, t0 + Duration::from_secs(1));
+        assert_eq!((fitted.headline_lines, fitted.note_lines), (2, 2));
+        let fitted = room.fit(want(1, 0), cap, t0 + Duration::from_secs(20));
+        assert_eq!((fitted.headline_lines, fitted.note_lines), (2, 2));
+        let fitted = room.fit(want(1, 0), cap, t0 + Duration::from_secs(40));
+        assert_eq!((fitted.headline_lines, fitted.note_lines), (1, 1));
+        let fitted = room.fit(want(1, 0), cap, t0 + Duration::from_secs(75));
+        assert_eq!((fitted.headline_lines, fitted.note_lines), (1, 0));
+        let tight = StoryNeeds {
+            headline_lines: 1,
+            note_lines: 1,
+        };
+        let fitted = room.fit(want(2, 3), tight, t0 + Duration::from_secs(80));
+        assert_eq!((fitted.headline_lines, fitted.note_lines), (1, 1));
     }
 
     #[test]

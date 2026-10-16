@@ -173,7 +173,7 @@ fn render_text(buf: &mut Buffer, area: Rect, workload: &Workload, app: &App) {
             proc.proc.pid,
             format::truncate(&user, 9),
             memory,
-            proc.proc.util.sm,
+            workload.proc_calm_sm(proc.proc.pid),
             command
         );
         put(buf, &line, theme.text(), &mut y);
