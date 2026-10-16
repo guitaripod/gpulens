@@ -6,6 +6,9 @@ pub const MIN_WIDTH: u16 = 60;
 pub const MIN_HEIGHT: u16 = 14;
 const WIDE_WIDTH: u16 = 100;
 const MIN_TABLE_WIDTH: u16 = 56;
+const STACK_MIN_HEIGHT: u16 = 30;
+const STACKED_DETAIL_MIN_HEIGHT: u16 = 52;
+const MIN_STACKED_MAIN: u16 = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Regions {
@@ -42,7 +45,13 @@ pub fn regions(area: Rect, needs: StoryNeeds) -> Option<Regions> {
         22..=29 => 1,
         _ => 2,
     };
-    let mut detail_height = if area.height >= 34 { 8 } else { 0 };
+    let stacked = area.width < WIDE_WIDTH && area.height >= STACK_MIN_HEIGHT;
+    let detail_floor = if stacked {
+        STACKED_DETAIL_MIN_HEIGHT
+    } else {
+        34
+    };
+    let mut detail_height = if area.height >= detail_floor { 8 } else { 0 };
     let fixed = 1 + story_height + bars_height + 1;
     let min_main = 6;
     while fixed + hardware_height + detail_height + min_main > area.height {
@@ -68,7 +77,7 @@ pub fn regions(area: Rect, needs: StoryNeeds) -> Option<Regions> {
     let detail = (detail_height > 0).then(|| take(detail_height));
     let hardware = (hardware_height > 0).then(|| take(hardware_height));
     let footer = take(1);
-    let (table, timeline) = split_main(main);
+    let (table, timeline) = split_main(main, stacked);
     Some(Regions {
         title,
         story,
@@ -81,8 +90,17 @@ pub fn regions(area: Rect, needs: StoryNeeds) -> Option<Regions> {
     })
 }
 
-fn split_main(main: Rect) -> (Rect, Option<Rect>) {
+/// Wide windows put the history beside the list; tall, narrow ones (a square pane) put it underneath, so the history is never lost just because the window is not wide.
+fn split_main(main: Rect, stacked: bool) -> (Rect, Option<Rect>) {
     if main.width < WIDE_WIDTH {
+        if stacked && main.height >= MIN_STACKED_MAIN {
+            let history = (main.height * 2 / 5).clamp(9, 16);
+            let list = main.height - history;
+            return (
+                Rect::new(main.x, main.y, main.width, list),
+                Some(Rect::new(main.x, main.y + list, main.width, history)),
+            );
+        }
         return (main, None);
     }
     let table_width = ((u32::from(main.width) * 55 / 100) as u16).max(MIN_TABLE_WIDTH);
@@ -122,6 +140,9 @@ mod tests {
             + r.story.height
             + r.bars.height
             + r.table.height
+            + r.timeline
+                .filter(|t| t.y > r.table.y)
+                .map_or(0, |t| t.height)
             + r.detail.map_or(0, |d| d.height)
             + r.hardware.map_or(0, |h| h.height)
             + r.footer.height
@@ -160,10 +181,22 @@ mod tests {
     }
 
     #[test]
-    fn narrow_terminals_drop_the_timeline() {
-        let r = regions(Rect::new(0, 0, 80, 40), NEEDS).unwrap();
+    fn short_narrow_terminals_drop_the_timeline() {
+        let r = regions(Rect::new(0, 0, 80, 24), NEEDS).unwrap();
         assert!(r.timeline.is_none());
         assert_eq!(r.table.width, 80);
+    }
+
+    #[test]
+    fn a_square_pane_stacks_the_history_under_the_list() {
+        let r = regions(Rect::new(0, 0, 90, 38), NEEDS).unwrap();
+        let timeline = r.timeline.expect("history");
+        assert_eq!(timeline.y, r.table.y + r.table.height);
+        assert_eq!((timeline.x, timeline.width), (r.table.x, r.table.width));
+        assert!(timeline.height >= 9 && r.table.height >= 10);
+        assert!(r.detail.is_none(), "the list already explains each app");
+        let tall = regions(Rect::new(0, 0, 90, 56), NEEDS).unwrap();
+        assert!(tall.detail.is_some() && tall.timeline.is_some());
     }
 
     #[test]

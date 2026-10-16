@@ -125,11 +125,16 @@ pub fn render_title(buf: &mut Buffer, area: Rect, app: &App) {
             x += widgets::text(buf, x, area.y, &label, style, left_limit.saturating_sub(x));
         }
     } else {
-        let name = format!(
+        let room = left_limit.saturating_sub(x + 1);
+        let with_driver = format!(
             "{}  {}  driver {}",
             device.info.name, theme.glyphs.sep, device.info.driver_version
         );
-        let room = left_limit.saturating_sub(x + 1);
+        let name = if UnicodeWidthStr::width(with_driver.as_str()) <= usize::from(room) {
+            with_driver
+        } else {
+            device.info.name.clone()
+        };
         widgets::text(
             buf,
             x + 1,

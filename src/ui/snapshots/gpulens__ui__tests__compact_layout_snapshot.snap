@@ -2,7 +2,7 @@
 source: src/ui/tests.rs
 expression: "render(&mut app, 80, 24)"
 ---
- gpulens  NVIDIA RTX PRO 6000 Blackwell (demo)  ·  driver 615.… ◆ AI helper off
+ gpulens  NVIDIA RTX PRO 6000 Blackwell (demo)                  ◆ AI helper off
  The GPU is maxed out (100%). The work is split between vLLM · 3f2a9c (55%),
  ComfyUI (32%) and vLLM · b81c0e (31%).
  GPU   █vLLM · 3f2a9c 55%██▌█████████████▎███████▊███████████▋ 100% busy

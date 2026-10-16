@@ -47,7 +47,7 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     let left = Rect::new(
         inner.x + 1,
         inner.y,
-        inner.width - right_width - 2,
+        inner.width - right_width - 4,
         inner.height,
     );
     let right = Rect::new(

@@ -346,3 +346,19 @@ fn the_room_for_the_story_does_not_change_with_its_wording() {
     let with_error = render(&mut app, 150, 46);
     assert_eq!(table_row(&before), table_row(&with_error));
 }
+
+#[test]
+fn square_layout_snapshot() {
+    let mut app = demo_app(truecolor());
+    insta::assert_snapshot!(render(&mut app, 90, 38));
+}
+
+#[test]
+fn a_square_pane_still_shows_the_history_and_every_panel_fits() {
+    let mut app = demo_app(truecolor());
+    let screen = render(&mut app, 90, 38);
+    assert!(screen.contains("Who used the GPU"), "{screen}");
+    assert!(screen.contains("Who is using the GPU"), "{screen}");
+    assert!(screen.contains("quit"), "{screen}");
+    assert!(screen.lines().all(|l| l.chars().count() <= 90));
+}

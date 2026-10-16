@@ -1,0 +1,42 @@
+---
+source: src/ui/tests.rs
+expression: "render(&mut app, 90, 38)"
+---
+ gpulens  NVIDIA RTX PRO 6000 Blackwell (demo)  ·  driver 615.71.09       ◆ AI helper off
+ The GPU is maxed out (100%). The work is split between vLLM · 3f2a9c (55%), ComfyUI
+ (32%) and vLLM · b81c0e (31%).
+  · llama.cpp server · qwen3-4b is idle but still holds 5.3 GB (6% of video memory). Clo…
+ GPU   █vLLM · 3f2a9c 55%██████▏████████████▊██▍█████████▌█ComfyUI 32%█▌ 100% busy
+ VRAM  ████████████████████▌██████████████▉███▌█▏████▊█████▉▍▎           79.7 / 95.6 GB
+┌ Who is using the GPU ───────────────────────────────────────── sort: impact · 11 shown ┐
+│    APP                                        KIND     STATE       GPU TIME        VRAM│
+│▶█  vLLM · 3f2a9c                              AI       ● busy      ██▊    55%   30.1 GB│
+│    Serves a large language model; memory stays reserved while it waits for requests.   │
+│ █  ComfyUI                                    AI       ● busy      █▋     32%    9.0 GB│
+│    Node-based image and video generation server; keeps models loaded between runs.     │
+│ █  vLLM · b81c0e                              AI       ● busy      █▌     31%   22.7 GB│
+│    Serves a large language model; memory stays reserved while it waits for requests.   │
+│ █  Counter Strike Global Offensive            Game     ◐ working   █▏     22%    8.4 GB│
+│    A game running through Steam.                                                       │
+│ █  KWin compositor                            Desktop  ◐ working   ▎       6%    380 MB│
+│    Draws your desktop windows and effects.                                             │
+│ █  Sunshine                                   Video    • light             1%    564 MB│
+│    Game streaming server; encodes your screen for Moonlight.                           │
+│ █  Plasma shell                               Desktop  • light             1%    210 MB│
+│    The desktop shell: panels, widgets and the app launcher.                            │
+│                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Who used the GPU · last 5m00s ──────────────────────────────────── t window · m metric ┐
+│ GPU time used                                                                          │
+│ 100%                                 ▂▁▂▁▁▂▃▅▄▂▃           ▇▆▇▆▄▃▄▅▅▃▆▇▇▇▇▇▇▇▇▇▇▇▇▇███ │
+│                                      ▇▃▂▃▄▆▇███▅▂▁▁▁▂▂▂▂▂▂▃▁█████████▁▂█▂▃▂▃▂▂▃▃▃▃▂▃▃▃ │
+│                                      ██████▁▂▂▃▃▄▄▄▅▅▅▅▅▄▄▃▆▃▃▃▃▄▄▃▃▂▄▆▃▆███▇▇▁▂▄▃▂▃▄▄ │
+│  50%                                 ▆▆▇▇█████████████████████████▇▇▆▂▁▃▆██████▁███▁▁▂ │
+│                                      ███████████████████████████████████████████▇▇████ │
+│    0                                 █████████████████████████████████████████████████ │
+│      -5m00s                                                                        now │
+│ █ vLLM · 3f2a9c  █ ComfyUI  █ vLLM · b81c0e  █ KWin compositor  █ Counter Strike Gl…   │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+ Power ███████  522/600 W   Temp 78°C   Core clock 2.70 GHz / 3.09 GHz   Fan 70%
+ PCIe ▲918 MB/s ▼1.4 GB/s  (Gen5 x16)   Video encode/decode 0% / 0%
+ q quit  ↑↓ select  s sort: impact  t window: 5m00s  / filter              live · 1000 ms
