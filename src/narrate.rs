@@ -1,6 +1,5 @@
 //! Turns raw readings into plain-language sentences, and checks that a language model's rewrite stayed truthful.
 
-use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
@@ -77,10 +76,11 @@ fn headline(device: &DeviceView) -> String {
     {
         return unattributable_headline(device, util);
     }
+    let claimed = claimed_percent(&active, util);
+    if claimed * 100 < u32::from(util) * 50 {
+        return underclaimed_headline(phrase, util, claimed, &active);
+    }
     match active.as_slice() {
-        [] => format!(
-            "The GPU is {phrase} ({util}%), but no visible app claims the work: another user, a container or the driver may be behind it."
-        ),
         [only] => format!(
             "The GPU is {phrase} ({util}%). {} is doing the work ({}%).",
             only.display_name, only.sm
@@ -102,6 +102,33 @@ fn headline(device: &DeviceView) -> String {
             )
         ),
     }
+}
+
+/// Busy time that visible apps account for, never more than the card's own figure.
+fn claimed_percent(active: &[&Workload], util: u8) -> u32 {
+    active
+        .iter()
+        .map(|w| u32::from(w.sm))
+        .sum::<u32>()
+        .min(u32::from(util))
+}
+
+/// Used when apps explain less than half of the busy figure, so the headline does not credit them with the work.
+fn underclaimed_headline(phrase: &str, util: u8, claimed: u32, active: &[&Workload]) -> String {
+    if active.is_empty() {
+        return format!(
+            "The GPU is {phrase} ({util}%), but no visible app claims the work: another user, a container or the driver may be behind it."
+        );
+    }
+    let named: Vec<String> = active
+        .iter()
+        .take(3)
+        .map(|w| format!("{} ({}%)", w.display_name, w.sm))
+        .collect();
+    format!(
+        "The GPU is {phrase} ({util}%), but only {claimed}% of that is tied to apps I can see: {}.",
+        format::join_names(&named)
+    )
 }
 
 /// Some GPUs (older cards, MIG, virtual GPUs) cannot say which process is busy, so only memory can be attributed.
@@ -140,7 +167,32 @@ fn others_clause(rest: &[&Workload]) -> String {
     }
 }
 
+/// The workload doing the most encoding or decoding, when the shaders are idle but video engines are not.
+fn busiest_video_workload(device: &DeviceView) -> Option<&Workload> {
+    device
+        .workloads
+        .iter()
+        .filter(|w| w.enc >= 10 || w.dec >= 10)
+        .max_by_key(|w| w.enc.max(w.dec))
+}
+
+fn video_headline(workload: &Workload, util: u8) -> String {
+    let engines: Vec<String> = [("encoder", workload.enc), ("decoder", workload.dec)]
+        .into_iter()
+        .filter(|(_, percent)| *percent > 0)
+        .map(|(engine, percent)| format!("{engine} {percent}%"))
+        .collect();
+    format!(
+        "The GPU's shaders are idle ({util}%), but {} is busy with video work ({}).",
+        workload.display_name,
+        engines.join(", ")
+    )
+}
+
 fn idle_headline(device: &DeviceView, util: u8) -> String {
+    if let Some(video) = busiest_video_workload(device) {
+        return video_headline(video, util);
+    }
     let mut holders: Vec<&Workload> = device
         .workloads
         .iter()
@@ -214,17 +266,24 @@ fn memory_pressure_note(device: &DeviceView) -> Option<Note> {
 
 fn heat_note(device: &DeviceView) -> Option<Note> {
     let sample = device.sample.as_ref()?;
-    if !(sample.throttle.thermal || sample.throttle.hardware) {
-        return None;
+    if sample.throttle.thermal {
+        let temp = sample
+            .temp_c
+            .map(|t| format!(" ({t}°C)"))
+            .unwrap_or_default();
+        return note(
+            Level::Warn,
+            format!("The GPU is running hot{temp} and slowing itself down to cool off."),
+        );
     }
-    let temp = sample
-        .temp_c
-        .map(|t| format!(" ({t}°C)"))
-        .unwrap_or_default();
-    note(
-        Level::Warn,
-        format!("The GPU is running hot{temp} and slowing itself down to cool off."),
-    )
+    if sample.throttle.hardware {
+        return note(
+            Level::Warn,
+            "The GPU's hardware is slowing it down (heat, or a power brake from outside the card)."
+                .into(),
+        );
+    }
+    None
 }
 
 fn power_note(device: &DeviceView, util: u8) -> Option<Note> {
@@ -364,6 +423,7 @@ pub fn facts(device: &DeviceView, story: &Story) -> Option<Facts> {
 /// A coarse fingerprint of the situation; a new narration is only worth requesting when it changes. Light flicker from tiny background apps is deliberately ignored.
 pub fn situation_signature(device: &DeviceView) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    device.info.index.hash(&mut hasher);
     if let Some(sample) = device.sample.as_ref() {
         (sample.gpu_util / 25).hash(&mut hasher);
         (format::share_pct(sample.mem_used, sample.mem_total) / 10).hash(&mut hasher);
@@ -388,42 +448,114 @@ pub fn situation_signature(device: &DeviceView) -> u64 {
     hasher.finish()
 }
 
-/// Every number token in `text`, as written (`78.4`, `96`, `3`).
-fn numbers_in(text: &str) -> Vec<f64> {
+/// The facts as prose with a unit on every figure, so `quantities` can tell what each number measures.
+fn facts_text(facts: &Facts) -> String {
+    let mut sentences = vec![
+        format!("{}.", facts.gpu),
+        format!("GPU busy {}%.", facts.gpu_busy_percent),
+        format!(
+            "Memory used {}, total {}, free {}.",
+            facts.memory_used, facts.memory_total, facts.memory_free
+        ),
+    ];
+    sentences.extend(facts.apps.iter().map(|app| {
+        format!(
+            "{} ({}) {}% {} {}.",
+            app.name, app.kind, app.compute_percent, app.memory, app.state
+        )
+    }));
+    sentences.extend(facts.findings.iter().cloned());
+    sentences.join(" ")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unit {
+    Percent,
+    Memory,
+    Watts,
+    Celsius,
+    Count,
+}
+
+/// Every decimal number in `text` with the unit written after it, memory normalised to megabytes.
+fn quantities(text: &str) -> Vec<(f64, Unit)> {
+    let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
-    let mut current = String::new();
-    let flush = |current: &mut String, out: &mut Vec<f64>| {
-        let trimmed = current.trim_end_matches('.');
-        if let Ok(value) = trimmed.parse::<f64>() {
-            out.push(value);
+    let mut at = 0;
+    while at < chars.len() {
+        if !chars[at].is_ascii_digit() {
+            at += 1;
+            continue;
         }
-        current.clear();
-    };
-    for ch in text.chars() {
-        if ch.is_ascii_digit() || (ch == '.' && !current.is_empty()) {
-            current.push(ch);
-        } else {
-            flush(&mut current, &mut out);
+        let start = at;
+        at = skip_digits(&chars, at);
+        if chars.get(at) == Some(&'.') && chars.get(at + 1).is_some_and(char::is_ascii_digit) {
+            at = skip_digits(&chars, at + 1);
+        }
+        let literal: String = chars[start..at].iter().collect();
+        if let Ok(value) = literal.parse::<f64>() {
+            let (scale, unit) = unit_after(&chars, at);
+            out.push((value * scale, unit));
         }
     }
-    flush(&mut current, &mut out);
     out
 }
 
-/// True when every number in `candidate` can be traced to the facts (allowing rounding), so a rewrite cannot invent figures.
+fn skip_digits(chars: &[char], mut at: usize) -> usize {
+    while chars.get(at).is_some_and(char::is_ascii_digit) {
+        at += 1;
+    }
+    at
+}
+
+/// The unit written after a number, and the factor that brings the value to that unit's base (megabytes for memory).
+fn unit_after(chars: &[char], from: usize) -> (f64, Unit) {
+    let mut at = from;
+    while chars.get(at) == Some(&' ') {
+        at += 1;
+    }
+    if chars.get(at) == Some(&'%') {
+        return (1.0, Unit::Percent);
+    }
+    if chars.get(at) == Some(&'°') && chars.get(at + 1) == Some(&'C') {
+        return (1.0, Unit::Celsius);
+    }
+    let word: String = chars[at..]
+        .iter()
+        .take_while(|c| c.is_alphabetic())
+        .collect();
+    if word == "W" {
+        return (1.0, Unit::Watts);
+    }
+    match word.to_ascii_lowercase().as_str() {
+        "gb" | "gib" => (1024.0, Unit::Memory),
+        "mb" | "mib" => (1.0, Unit::Memory),
+        "kb" => (1.0 / 1024.0, Unit::Memory),
+        _ => (1.0, Unit::Count),
+    }
+}
+
+/// Small numbers pass. Anything else must match a fact of the same unit (any fact for a bare count), or be the headroom left under a fact percentage.
+fn is_allowed(value: f64, unit: Unit, known: &[(f64, Unit)]) -> bool {
+    if value <= 10.0 {
+        return true;
+    }
+    let matches_fact = known.iter().any(|&(fact, fact_unit)| {
+        (unit == Unit::Count || fact_unit == unit) && (value - fact).abs() <= (fact * 0.02).max(0.6)
+    });
+    let headroom = unit == Unit::Percent
+        && known.iter().any(|&(fact, fact_unit)| {
+            fact_unit == Unit::Percent && (value - (100.0 - fact)).abs() <= 0.6
+        });
+    matches_fact || headroom
+}
+
+/// True when every figure in `candidate` can be traced to the facts with the same unit (allowing rounding), so a rewrite cannot invent figures.
 pub fn is_grounded(candidate: &str, facts: &Facts) -> bool {
-    let Ok(serialized) = serde_json::to_string(facts) else {
-        return false;
-    };
-    let allowed: Vec<f64> = numbers_in(&serialized);
-    let seen: HashSet<u64> = allowed.iter().map(|v| v.to_bits()).collect();
-    numbers_in(candidate).into_iter().all(|value| {
-        value <= 10.0
-            || seen.contains(&value.to_bits())
-            || allowed
-                .iter()
-                .any(|a| (value - a).abs() <= (a * 0.03).max(0.6))
-    })
+    let known = quantities(&facts_text(facts));
+    quantities(candidate)
+        .into_iter()
+        .all(|(value, unit)| is_allowed(value, unit, &known))
 }
 
 #[cfg(test)]
@@ -682,8 +814,142 @@ mod tests {
         );
     }
 
+    fn facts_with_memory_total(total_gib: f64) -> Facts {
+        let id = identity("vllm", "vLLM", Category::Ai);
+        let mut m = model();
+        feed(&mut m, 62, 31 * GIB, vec![observed(1, id, 30 * GIB, 60)]);
+        m.devices[0].sample.as_mut().unwrap().mem_total = (total_gib * GIB as f64) as u64;
+        let st = story(&m.devices[0], m.interval);
+        facts(&m.devices[0], &st).unwrap()
+    }
+
     #[test]
-    fn numbers_are_extracted_without_trailing_dots() {
-        assert_eq!(numbers_in("78.4 GB of 96. Done 3."), vec![78.4, 96.0, 3.0]);
+    fn quantities_read_units_and_normalise_memory() {
+        assert_eq!(
+            quantities("60% 30.0 GB 2 GiB 512 MB 1024 KB 350 W 78°C 3 apps 96."),
+            vec![
+                (60.0, Unit::Percent),
+                (30.0 * 1024.0, Unit::Memory),
+                (2048.0, Unit::Memory),
+                (512.0, Unit::Memory),
+                (1.0, Unit::Memory),
+                (350.0, Unit::Watts),
+                (78.0, Unit::Celsius),
+                (3.0, Unit::Count),
+                (96.0, Unit::Count),
+            ]
+        );
+    }
+
+    #[test]
+    fn grounding_needs_the_same_unit() {
+        let f = facts_with_memory_total(95.6);
+        assert!(!is_grounded("The GPU is at 95% load.", &f));
+        assert!(!is_grounded("Apps use 93 GB.", &f));
+        assert!(!is_grounded("It holds 55 GB.", &f));
+        assert!(is_grounded("The GPU is 62% busy and 30 GB is held.", &f));
+        assert!(is_grounded("About 38% is free.", &f));
+        assert!(is_grounded("There are 3 apps.", &f));
+        assert!(is_grounded("Two apps share the card.", &f));
+    }
+
+    #[test]
+    fn headline_does_not_credit_a_small_share_to_the_only_app() {
+        let id = identity("vllm", "vLLM", Category::Ai);
+        let s = run(85, 31 * GIB, vec![observed(1, id, 30 * GIB, 10)]);
+        assert_eq!(
+            s.headline,
+            "The GPU is busy (85%), but only 10% of that is tied to apps I can see: vLLM (10%)."
+        );
+    }
+
+    #[test]
+    fn unexplained_load_lists_the_top_three_claims() {
+        let procs = vec![
+            observed(1, identity("a", "A", Category::Ai), GIB, 8),
+            observed(2, identity("b", "B", Category::Game), GIB, 7),
+            observed(3, identity("c", "C", Category::Media), GIB, 6),
+            observed(4, identity("d", "D", Category::Other), GIB, 5),
+        ];
+        let s = run(80, 4 * GIB, procs);
+        assert_eq!(
+            s.headline,
+            "The GPU is busy (80%), but only 26% of that is tied to apps I can see: A (8%), B (7%) and C (6%)."
+        );
+    }
+
+    #[test]
+    fn video_work_is_not_called_idle() {
+        let id = identity("sunshine", "Sunshine", Category::Media);
+        let mut p = observed(1, id, GIB, 0);
+        p.proc.util.enc = 28;
+        p.proc.util.dec = 5;
+        let s = run(2, 2 * GIB, vec![p]);
+        assert_eq!(
+            s.headline,
+            "The GPU's shaders are idle (2%), but Sunshine is busy with video work (encoder 28%, decoder 5%)."
+        );
+    }
+
+    #[test]
+    fn decoder_only_video_work_names_only_the_decoder() {
+        let id = identity("player", "Player", Category::Media);
+        let mut p = observed(1, id, GIB, 0);
+        p.proc.util.dec = 40;
+        let s = run(1, 2 * GIB, vec![p]);
+        assert_eq!(
+            s.headline,
+            "The GPU's shaders are idle (1%), but Player is busy with video work (decoder 40%)."
+        );
+    }
+
+    #[test]
+    fn thermal_throttling_says_the_gpu_is_running_hot() {
+        let mut m = model();
+        feed(&mut m, 90, 10 * GIB, vec![]);
+        let sample = m.devices[0].sample.as_mut().unwrap();
+        sample.throttle.thermal = true;
+        sample.temp_c = Some(87);
+        let notes = story(&m.devices[0], m.interval).notes;
+        assert!(notes.iter().any(|n| n.level == Level::Warn
+            && n.text == "The GPU is running hot (87°C) and slowing itself down to cool off."));
+    }
+
+    #[test]
+    fn hardware_slowdown_without_heat_is_not_called_hot() {
+        let mut m = model();
+        feed(&mut m, 90, 10 * GIB, vec![]);
+        m.devices[0].sample.as_mut().unwrap().throttle.hardware = true;
+        let notes = story(&m.devices[0], m.interval).notes;
+        assert!(notes.iter().any(|n| n.level == Level::Warn
+            && n.text
+                == "The GPU's hardware is slowing it down (heat, or a power brake from outside the card)."));
+        assert!(notes.iter().all(|n| !n.text.contains("running hot")));
+    }
+
+    #[test]
+    fn signature_tells_identical_devices_apart_by_index() {
+        let build = || {
+            let mut m = model();
+            feed(
+                &mut m,
+                60,
+                10 * GIB,
+                vec![observed(1, identity("a", "A", Category::Ai), 8 * GIB, 55)],
+            );
+            m
+        };
+        let first = build();
+        let same = build();
+        let mut other = build();
+        other.devices[0].info.index = 1;
+        assert_eq!(
+            situation_signature(&first.devices[0]),
+            situation_signature(&same.devices[0])
+        );
+        assert_ne!(
+            situation_signature(&first.devices[0]),
+            situation_signature(&other.devices[0])
+        );
     }
 }
