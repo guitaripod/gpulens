@@ -104,6 +104,7 @@ pub struct FrameEntry {
 /// One tick of history for one device.
 #[derive(Clone, Debug)]
 pub struct Frame {
+    pub seq: u64,
     pub gpu_util: u8,
     pub mem_used: u64,
     pub entries: Vec<FrameEntry>,
@@ -120,6 +121,7 @@ pub struct DeviceView {
     pub sample: Option<DeviceSample>,
     pub workloads: Vec<Workload>,
     pub frames: VecDeque<Frame>,
+    next_seq: u64,
     idle_ticks: HashMap<WorkloadId, u32>,
 }
 
@@ -130,6 +132,7 @@ impl DeviceView {
             sample: None,
             workloads: Vec::new(),
             frames: VecDeque::new(),
+            next_seq: 0,
             idle_ticks: HashMap::new(),
         }
     }
@@ -273,7 +276,10 @@ impl Model {
         self.remember_display_names(position, &workloads);
         sort_by_impact(&mut workloads);
 
+        let seq = self.devices[position].next_seq;
+        self.devices[position].next_seq += 1;
         let frame = Frame {
+            seq,
             gpu_util: sample.gpu_util,
             mem_used: sample.mem_used,
             entries: workloads
