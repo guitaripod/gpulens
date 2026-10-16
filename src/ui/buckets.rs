@@ -12,19 +12,18 @@ pub fn column_ranges(
         return vec![None; width];
     }
     let cells = if window_frames >= width {
-        bucketed(seqs, window_frames.div_ceil(width))
+        bucketed(seqs, width, window_frames)
     } else {
         spread(seqs, width, width.div_ceil(window_frames))
     };
     right_align(cells, width)
 }
 
-/// Groups consecutive frames whose `seq / frames_per_column` is equal, one run per bucket.
-fn bucketed(seqs: &[u64], frames_per_column: usize) -> Vec<Option<Range<usize>>> {
-    let per_column = frames_per_column as u64;
-    let mut runs: Vec<(u64, Range<usize>)> = Vec::new();
+/// Groups consecutive frames into `width` buckets per window by the absolute formula `seq * width / window_frames`. The same frame always lands in the same bucket, and the buckets fill the full width even when the window is not a multiple of it.
+fn bucketed(seqs: &[u64], width: usize, window_frames: usize) -> Vec<Option<Range<usize>>> {
+    let mut runs: Vec<(u128, Range<usize>)> = Vec::new();
     for (index, seq) in seqs.iter().enumerate() {
-        let bucket = seq / per_column;
+        let bucket = u128::from(*seq) * width as u128 / window_frames as u128;
         match runs.last_mut() {
             Some((id, range)) if *id == bucket => range.end = index + 1,
             _ => runs.push((bucket, index..index + 1)),
@@ -74,6 +73,16 @@ mod tests {
         let seqs: Vec<u64> = (0..12).collect();
         let columns = column_ranges(&seqs, 4, 20);
         assert_eq!(columns, vec![None, Some(0..5), Some(5..10), Some(10..12),]);
+    }
+
+    #[test]
+    fn the_whole_width_is_used_even_when_the_window_is_not_a_multiple() {
+        for (width, window) in [(59usize, 60usize), (100, 101), (120, 300), (7, 50)] {
+            let seqs: Vec<u64> = (1000..1000 + window as u64).collect();
+            let columns = column_ranges(&seqs, width, window);
+            assert!(columns.iter().all(Option::is_some), "{width}x{window}");
+            assert_eq!(columns.len(), width);
+        }
     }
 
     #[test]

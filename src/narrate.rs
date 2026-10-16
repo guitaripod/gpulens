@@ -76,7 +76,7 @@ fn headline(device: &DeviceView) -> String {
     {
         return unattributable_headline(device, util);
     }
-    let claimed = claimed_percent(&active, util);
+    let claimed = device.attributed_sm().min(u32::from(util));
     if claimed * 100 < u32::from(util) * 50 {
         return underclaimed_headline(phrase, util, claimed, &active);
     }
@@ -103,15 +103,6 @@ fn headline(device: &DeviceView) -> String {
             )
         ),
     }
-}
-
-/// Busy time that visible apps account for, never more than the card's own figure.
-fn claimed_percent(active: &[&Workload], util: u8) -> u32 {
-    active
-        .iter()
-        .map(|w| u32::from(w.calm_sm()))
-        .sum::<u32>()
-        .min(u32::from(util))
 }
 
 /// Used when apps explain less than half of the busy figure, so the headline does not credit them with the work.
@@ -293,7 +284,7 @@ fn power_note(device: &DeviceView, util: u8) -> Option<Note> {
     if !device.calm_throttle.power || util < 50 {
         return None;
     }
-    let detail = match (sample.power_w, sample.power_limit_w) {
+    let detail = match (device.power_avg, sample.power_limit_w) {
         (Some(draw), Some(limit)) => format!(" ({draw:.0} of {limit:.0} W)"),
         _ => String::new(),
     };

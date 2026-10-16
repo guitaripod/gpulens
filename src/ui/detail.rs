@@ -91,6 +91,20 @@ fn render_text(buf: &mut Buffer, area: Rect, workload: &Workload, app: &App) {
     for line in format::wrap(&description, width, 2) {
         put(buf, &line, theme.dim(), &mut y);
     }
+    if workload.exited {
+        let (sm, mem) = workload.last_seen.unwrap_or((0.0, 0));
+        put(
+            buf,
+            &format!(
+                "Exited. Last seen using {sm:.0}% of GPU time and holding {}.",
+                format::bytes(mem)
+            ),
+            theme.text(),
+            &mut y,
+        );
+        put(buf, &context_line(workload), theme.dim(), &mut y);
+        return;
+    }
     if let Some(explanation) = app.explanation_for(&workload.key) {
         for (index, line) in format::wrap(explanation, width.saturating_sub(2), 3)
             .into_iter()
@@ -138,11 +152,10 @@ fn render_text(buf: &mut Buffer, area: Rect, workload: &Workload, app: &App) {
         workload.calm_enc(),
         workload.calm_dec()
     );
-    let verb = if workload.exited { "Was" } else { "Now" };
     put(
         buf,
         &format!(
-            "{verb}: {:.0}% GPU time · {memory} · {engines}",
+            "Now: {:.0}% GPU time · {memory} · {engines}",
             workload.shown_sm(app.now)
         ),
         theme.text(),

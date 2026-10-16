@@ -32,7 +32,13 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) -> TableOutcome {
     let block = Block::bordered()
         .border_style(theme.border_focus())
         .title(Line::styled(" Who is using the GPU ", theme.title()))
-        .title_top(Line::styled(subtitle(app, rows.len()), theme.dim()).right_aligned());
+        .title_top(
+            Line::styled(
+                subtitle(app, rows.iter().filter(|w| !w.exited).count()),
+                theme.dim(),
+            )
+            .right_aligned(),
+        );
     let inner = block.inner(area);
     block.render(area, buf);
     if inner.height < 2 || inner.width < 20 {

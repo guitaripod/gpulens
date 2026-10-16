@@ -18,6 +18,8 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App) {
     calm.power_w = device.power_avg.map(|v| v as f32);
     calm.pcie_tx_kbps = device.pcie_tx_avg.map(|v| v.round() as u32);
     calm.pcie_rx_kbps = device.pcie_rx_avg.map(|v| v.round() as u32);
+    calm.enc_util = device.enc_avg.map(|v| v.round().clamp(0.0, 100.0) as u8);
+    calm.dec_util = device.dec_avg.map(|v| v.round().clamp(0.0, 100.0) as u8);
     calm.throttle = Throttle {
         unknown: raw.throttle.unknown,
         ..device.calm_throttle

@@ -19,10 +19,10 @@ expression: "render(&mut app, 80, 24)"
 │    A game running through Steam.                                             │
 │ █  KWin compositor                           ◐ working   ▎       6%    380 MB│
 │    Draws your desktop windows and effects.                                   │
-│ █  llama.cpp server · qwen3-4b               ○ idle 14s  —             5.3 GB│
-│    Serves a large language model; memory stays reserved while it waits for … │
 │ █  Sunshine                                  • light             1%    564 MB│
 │    Game streaming server; encodes your screen for Moonlight.                 │
+│ █  Plasma shell                              • light             1%    210 MB│
+│    The desktop shell: panels, widgets and the app launcher.                  │
 └──────────────────────────────────────────────────────────────────────────────┘
  Power ███████  522/600 W   Temp 78°C   Core clock 2.70 GHz / 3.09 GHz
  q quit  ↑↓ select  s sort: impact  t window: 5m00s  / filter    live · 1000 ms

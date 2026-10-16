@@ -22,6 +22,7 @@ pub struct Tween {
     to: f64,
     start: Instant,
     span: Duration,
+    epsilon: f64,
 }
 
 impl Tween {
@@ -32,12 +33,19 @@ impl Tween {
             to: value,
             start: now,
             span: Duration::ZERO,
+            epsilon: 1e-9,
         }
+    }
+
+    /// Ignores retargets smaller than `epsilon`, the smallest change anyone could see, so a value that is merely wobbling does not keep the screen animating.
+    pub fn with_epsilon(mut self, epsilon: f64) -> Self {
+        self.epsilon = epsilon;
+        self
     }
 
     /// Starts gliding from the current position to `to`. An unchanged target leaves a running glide alone.
     pub fn retarget(&mut self, to: f64, now: Instant, span: Duration) {
-        if (to - self.to).abs() < 1e-9 {
+        if (to - self.to).abs() < self.epsilon {
             return;
         }
         self.from = self.value(now);
@@ -127,6 +135,16 @@ mod tests {
         let before = tween.value(later);
         tween.retarget(50.0, later, Duration::from_millis(400));
         assert_eq!(tween.value(later), before);
+        assert_eq!(tween.ends_at(), t0 + Duration::from_millis(400));
+    }
+
+    #[test]
+    fn changes_below_the_epsilon_are_ignored() {
+        let t0 = Instant::now();
+        let mut tween = Tween::settled_at(50.0, t0).with_epsilon(0.1);
+        tween.retarget(50.05, t0, Duration::from_millis(400));
+        assert_eq!(tween.ends_at(), t0);
+        tween.retarget(50.5, t0, Duration::from_millis(400));
         assert_eq!(tween.ends_at(), t0 + Duration::from_millis(400));
     }
 

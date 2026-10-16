@@ -520,13 +520,14 @@ impl App {
             self.selected_row = 0;
             return;
         }
+        let first_live = self.visible().iter().position(|w| !w.exited).unwrap_or(0);
         let index = if self.user_chose {
             self.selection
                 .as_ref()
                 .and_then(|key| keys.iter().position(|k| k == key))
                 .unwrap_or_else(|| self.selected_row.min(keys.len() - 1))
         } else {
-            0
+            first_live
         };
         self.selected_row = index;
         self.selection = Some(keys[index].clone());
@@ -856,6 +857,11 @@ impl App {
         let Some(workload) = self.selected() else {
             return;
         };
+        if workload.exited {
+            let message = format!("{} has already exited.", workload.display_name);
+            self.notify(message, Level::Info, now);
+            return;
+        }
         let key = workload.key.clone();
         let focus = format!(
             "{} ({})",
@@ -1387,6 +1393,7 @@ mod tests {
             })),
             now,
         );
+        a.handle(key(KeyCode::Up), now);
         a.handle(key(KeyCode::Char('x')), now);
         assert!(matches!(a.overlay, Overlay::None));
         assert!(
