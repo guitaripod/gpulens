@@ -64,7 +64,7 @@ impl Tuning {
             smoothing: Duration::from_millis(1500),
             tween: Duration::from_millis(700),
             ghost: Duration::from_secs(5),
-            lower_dwell: Duration::from_secs(3),
+            lower_dwell: Duration::from_millis(1500),
             settle: Duration::from_millis(1800),
         }
     }
