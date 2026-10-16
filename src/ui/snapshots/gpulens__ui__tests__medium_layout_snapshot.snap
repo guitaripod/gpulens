@@ -1,0 +1,35 @@
+---
+source: src/ui/tests.rs
+assertion_line: 58
+expression: "render(&mut app, 100, 30)"
+---
+ gpulens  NVIDIA RTX PRO 6000 Blackwell (demo)  ·  driver 615.71.09                 ◆ AI helper off
+ The GPU is maxed out (100%). The work is split between vLLM · 3f2a9c (55%), ComfyUI (32%) and vLLM
+ · b81c0e (31%).
+  · llama.cpp server · qwen3-4b is idle but still holds 5.3 GB (6% of video memory). Closing it wo…
+ GPU   █████vLLM · 3f2a9c 55%█████▉██ComfyUI 32%███▏██████████████▊██████████████▌ 100% busy
+ VRAM  █vLLM · 3f2a9c 30.1 GB█▋█████████████████▍██████▌██████████▎▋▍▌             79.7 / 95.6 GB
+┌ Who is using the GPU ─────── sort: impact · 11 shown ┐┌ History · 5m00s ─────────────────────────┐
+│    APP               STATE       GPU TIME        VRAM││ GPU time used                            │
+│▶█  vLLM · 3f2a9c     ● busy      ██▊    55%   30.1 GB││ 100%               ▂ ▂▃▁    ▇▇▇▇▇▇▇▆▆▇▇▇ │
+│    Serves a large language model; memory stays rese… ││                    ▅▂▁▅▂  ▁ ▃███████████ │
+│ █  ComfyUI           ● busy      █▋     32%    9.0 GB││                    ▁▄███▃▂▃▂▇▁▂▂▁▃▁▄▃▂▃▅ │
+│    Node-based image and video generation server; ke… ││                    ████▁▂▃▃▂▅▅▅▅▃▄▅█▇██▁ │
+│ █  vLLM · b81c0e     ● busy      █▌     31%   22.7 GB││  50%               ▁▂▄▇█████▇▁▁██▁▁▃▄▆▅█ │
+│    Serves a large language model; memory stays rese… ││                    ████████████▆▅▃█████▂ │
+│ █  Counter Strike G… ◐ working   █▏     22%    8.4 GB││                    ███████████████████▇█ │
+│    A game running through Steam.                     ││                    █████████████████████ │
+│ █  KWin compositor   ◐ working   ▎       6%    380 MB││    0               █████████████████████ │
+│    Draws your desktop windows and effects.           ││ Video memory used                        │
+│ █  Sunshine          • light             1%    564 MB││95.6                                      │
+│    Game streaming server; encodes your screen for M… ││                    ▁▁▁▁▁▁▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁ │
+│ █  Plasma shell      • light             1%    210 MB││                    ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ │
+│    The desktop shell: panels, widgets and the app l… ││47.8                █████████████████████ │
+│ █  llama.cpp server… ○ idle 14s  —             5.3 GB││                    ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇ │
+│    Serves a large language model; memory stays rese… ││    0               █████████████████████ │
+│ █  Vivaldi           ○ idle 45s  —             1.8 GB││      -5m00s                          now │
+│    Draws web pages with the GPU.                     ││ █ vLLM · 3f2a9c  █ ComfyUI               │
+└──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
+ Power ███████  522/600 W   Temp 78°C   Core clock 2.70 GHz / 3.09 GHz   Memory clock 13.37 GHz
+ PCIe ▲918 MB/s ▼1.4 GB/s  (Gen5 x16)   Video encode/decode 0% / 0%
+ q quit  ↑↓ select  s sort: impact  t window: 5m00s  / filter  space pause           live · 1000 ms

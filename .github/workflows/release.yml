@@ -1,0 +1,29 @@
+name: release
+
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          name="gpulens-${GITHUB_REF_NAME}-x86_64-linux"
+          mkdir "$name"
+          cp target/release/gpulens LICENSE README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            gpulens-*.tar.gz
+            gpulens-*.tar.gz.sha256
