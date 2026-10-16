@@ -56,7 +56,7 @@ impl Tuning {
             tween: Duration::from_millis(700),
             ghost: Duration::from_secs(5),
             lower_dwell: Duration::from_secs(3),
-            settle: Duration::from_millis(2500),
+            settle: Duration::from_millis(1800),
         }
     }
 }

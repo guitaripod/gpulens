@@ -92,7 +92,7 @@ fn badges(app: &App) -> (String, Style) {
 
 pub fn render_help(buf: &mut Buffer, area: Rect, app: &App) {
     let theme = &app.theme;
-    let popup = centered(area, 78, 26);
+    let popup = centered(area, 78, 28);
     Clear.render(popup, buf);
     let block = Block::bordered()
         .border_style(theme.border_focus())
@@ -110,16 +110,17 @@ pub fn render_help(buf: &mut Buffer, area: Rect, app: &App) {
     let mark = theme.glyphs.ai_mark;
     let lines = vec![
         heading("What you are looking at"),
-        body("  Every app has one colour, used in the bars, the list and the history chart."),
+        body("  Every app has one colour, used in the bars, the list and the chart."),
         body("  GPU bar     share of GPU time each app is using right now."),
-        body("  VRAM bar    video memory each app holds. The dark track is free memory."),
-        body("  busy / working / light   the app is doing work.   idle   it only holds memory."),
+        body("  VRAM bar    video memory each app holds; the dark track is free."),
+        body("  busy, working, light   the app is doing work."),
+        body("  idle                   it only holds memory."),
         body("  unclaimed   load the driver cannot tie to a process you can see:"),
         body("              other users, containers, or the desktop itself."),
+        body("  exited      an app that just left; it fades out in a few seconds."),
+        body("  Numbers are smoothed and wording settles, so the screen stays calm."),
         Line::styled(
-            format!(
-                "  {mark} marks text the local AI helper wrote or identified. Everything else is measured."
-            ),
+            format!("  {mark} marks text the AI helper wrote or identified; the rest is measured."),
             theme.ai(),
         ),
         Line::raw(""),
@@ -127,33 +128,26 @@ pub fn render_help(buf: &mut Buffer, area: Rect, app: &App) {
         key("↑ ↓  j k", "select an app       Home/End  first/last"),
         key("Tab  [ ]", "switch GPU (when you have more than one)"),
         key("s", "sort: impact, memory, name, kind"),
-        key(
-            "t   m",
-            "history window: 1m, 5m, 15m, 1h  ·  chart metric on small screens",
-        ),
+        key("t   m", "history window: 1m 5m 15m 1h  ·  m: chart metric"),
         key("/", "filter by name, kind or command"),
         key(
             "d   a",
-            "show or hide the one-line explanations  ·  AI wording or plain wording",
+            "hide or show explanations  ·  a: AI or plain wording",
         ),
-        key(
-            "space",
-            "pause the picture (sampling continues in the background)",
-        ),
-        key("+  -", "sample faster or slower"),
+        key("space", "pause the picture (sampling continues underneath)"),
+        key("+  -", "sample faster or slower (restarts the history)"),
         key(
             "x",
-            "stop the selected app (asks first, never touches desktop or system apps)",
+            "stop the selected app (asks first; never desktop or system)",
         ),
-        key(
-            "e",
-            "ask the AI helper why the selected app is using the GPU",
-        ),
+        key("e", "ask the AI helper why the selected app uses the GPU"),
         key("r   q", "refresh now  ·  quit"),
         Line::raw(""),
         Line::styled("  Press any key to close.", theme.faint()),
     ];
-    Paragraph::new(lines).render(inner, buf);
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .render(inner, buf);
 }
 
 pub fn render_confirm(buf: &mut Buffer, area: Rect, app: &App, prompt: &KillPrompt) {
