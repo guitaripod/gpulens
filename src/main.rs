@@ -41,7 +41,7 @@ use crate::sampler::Sampler;
 use crate::ui::theme::Theme;
 
 const FRAME_WAIT: Duration = Duration::from_millis(250);
-const ANIMATION_WAIT: Duration = Duration::from_millis(33);
+const ANIMATION_WAIT: Duration = Duration::from_millis(45);
 const EVENTS_PER_FRAME: usize = 256;
 
 fn main() -> ExitCode {

@@ -65,7 +65,7 @@ Colours follow the terminal's capabilities (truecolor, 256, 16, or none with `NO
 Raw GPU readings twitch every second. gpulens is built so the picture does not:
 
 - Numbers are smoothed over about a second and a half, and the bars glide between readings instead of jumping.
-- Rows keep their order. An app only moves up when it is clearly ahead of the one above it, so two similar apps do not trade places.
+- Rows keep their order. Apps that have been using the GPU lately come first, ranked on a slow average, then the idle ones by memory. An app only moves up when it is clearly ahead of the one above it, so similar apps do not trade places.
 - State labels (busy, working, light, idle) need a clear margin to climb and a few seconds below it to fall.
 - The headline and findings only change wording after the new wording has held for a moment. The room they occupy grows at once when needed but only shrinks after half a minute of quiet, so the panels below them rarely shift.
 - Bar segments keep their colour order. The history chart is anchored to absolute time, so it scrolls instead of shimmering.

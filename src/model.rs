@@ -12,8 +12,10 @@ pub const COLOR_SLOTS: u8 = 8;
 const IMPORTANCE_WINDOW: Duration = Duration::from_secs(300);
 const IMPACT_MARGIN: f64 = 3.0;
 const IMPACT_RATIO: f64 = 1.2;
-const RANK_SMOOTHING_FACTOR: u32 = 3;
-const IDLE_IMPACT: f64 = 1.0;
+const RANK_SMOOTHING_FACTOR: u32 = 5;
+const CONTRIBUTOR_ON: f64 = 1.5;
+const CONTRIBUTOR_OFF: f64 = 0.7;
+const CONTRIBUTOR_FIRST_SIGHT: f64 = 1.0;
 const MEMORY_MARGIN_RATIO: f64 = 1.1;
 const MEMORY_MARGIN_BYTES: f64 = 64.0 * 1024.0 * 1024.0;
 const TWEEN_SHARE_OF_INTERVAL: f64 = 0.85;
@@ -285,6 +287,7 @@ struct Track {
     idle_ticks: u32,
     absent_ticks: u32,
     impact: f64,
+    contributor: bool,
     mem: u64,
     shown: Shown,
     pid_sm: HashMap<Pid, f64>,
@@ -603,6 +606,13 @@ impl Model {
             } else {
                 blend(track.impact, instant_impact, rank_alpha)
             };
+            track.contributor = if fresh || !calm {
+                track.impact >= CONTRIBUTOR_FIRST_SIGHT
+            } else if track.contributor {
+                track.impact >= CONTRIBUTOR_OFF
+            } else {
+                track.impact >= CONTRIBUTOR_ON
+            };
             track.mem = workload.mem_bytes;
             track.shown.retarget(
                 track.sm_avg,
@@ -695,13 +705,21 @@ impl Model {
     fn order_workloads(&mut self, position: usize, workloads: &mut [Workload]) {
         let calm = self.tuning.is_calm();
         let device = &mut self.devices[position];
-        let ranks: HashMap<WorkloadId, (f64, u64)> = workloads
+        let ranks: HashMap<WorkloadId, Rank> = workloads
             .iter()
             .map(|w| {
-                let rank = device
-                    .tracks
-                    .get(&w.id)
-                    .map_or((0.0, 0), |t| (t.impact, t.mem));
+                let rank = device.tracks.get(&w.id).map_or(
+                    Rank {
+                        group: IDLE_GROUP,
+                        impact: 0.0,
+                        mem: 0,
+                    },
+                    |t| Rank {
+                        group: if t.contributor { 0 } else { IDLE_GROUP },
+                        impact: t.impact,
+                        mem: t.mem,
+                    },
+                );
                 (w.id, rank)
             })
             .collect();
@@ -712,18 +730,14 @@ impl Model {
             .copied()
             .filter(|id| !known.contains(id))
             .collect();
-        newcomers.sort_by(|a, b| {
-            let (ra, rb) = (ranks[a], ranks[b]);
-            rb.0.total_cmp(&ra.0).then(rb.1.cmp(&ra.1)).then(a.cmp(b))
-        });
+        newcomers.sort_by(|a, b| exact_order(ranks[a], ranks[b]).then(a.cmp(b)));
         device.order.extend(newcomers);
         if calm {
             settle_order(&mut device.order, &ranks);
         } else {
-            device.order.sort_by(|a, b| {
-                let (ra, rb) = (ranks[a], ranks[b]);
-                rb.0.total_cmp(&ra.0).then(rb.1.cmp(&ra.1)).then(a.cmp(b))
-            });
+            device
+                .order
+                .sort_by(|a, b| raw_order(ranks[a], ranks[b]).then(a.cmp(b)));
         }
         let place: HashMap<WorkloadId, usize> = device
             .order
@@ -964,6 +978,7 @@ impl Track {
             idle_ticks: 0,
             absent_ticks: 0,
             impact: 0.0,
+            contributor: false,
             mem: 0,
             shown: Shown::settled(0.0, 0.0, 0.0, 0.0, now),
             pid_sm: HashMap::new(),
@@ -1044,18 +1059,43 @@ fn smoothed(previous: Option<f64>, new: Option<f64>, alpha: f64) -> Option<f64> 
     }
 }
 
-/// True when `a` is clearly ahead of `b`: by a margin of GPU time, or, between apps that are both idle, by a margin of memory.
-fn beats(a: (f64, u64), b: (f64, u64)) -> bool {
-    if a.0 > b.0 * IMPACT_RATIO + IMPACT_MARGIN {
-        return true;
+const IDLE_GROUP: u8 = 1;
+
+/// Where an app sits in the list: apps that have been contributing to the load lately come first, everything else (idle holders and the faintest flickers) after them, biggest memory first. Membership follows a slow average with a gap between joining and leaving, so a background app that twitches does not hop around the list.
+/// What the order is decided on: the group, the smoothed GPU time, and memory.
+#[derive(Clone, Copy, Debug)]
+struct Rank {
+    group: u8,
+    impact: f64,
+    mem: u64,
+}
+
+/// A strict sort used when there is no history to respect: group, then GPU time, then memory.
+fn exact_order(a: Rank, b: Rank) -> std::cmp::Ordering {
+    a.group
+        .cmp(&b.group)
+        .then(b.impact.total_cmp(&a.impact))
+        .then(b.mem.cmp(&a.mem))
+}
+
+/// The un-grouped sort of raw mode: GPU time, then memory.
+fn raw_order(a: Rank, b: Rank) -> std::cmp::Ordering {
+    b.impact.total_cmp(&a.impact).then(b.mem.cmp(&a.mem))
+}
+
+/// True when `a` is clearly ahead of `b`. A different group decides at once. Within a group an app has to lead by a margin of GPU time (idle apps: of memory) before it moves above one that is already above it, so near-equal apps do not trade places.
+fn beats(a: Rank, b: Rank) -> bool {
+    if a.group != b.group {
+        return a.group < b.group;
     }
-    a.0 < IDLE_IMPACT
-        && b.0 < IDLE_IMPACT
-        && a.1 as f64 > b.1 as f64 * MEMORY_MARGIN_RATIO + MEMORY_MARGIN_BYTES
+    match a.group {
+        IDLE_GROUP => a.mem as f64 > b.mem as f64 * MEMORY_MARGIN_RATIO + MEMORY_MARGIN_BYTES,
+        _ => a.impact > b.impact * IMPACT_RATIO + IMPACT_MARGIN,
+    }
 }
 
 /// Bubbles apps upwards past neighbours they clearly beat; apps that are merely close keep their places.
-fn settle_order(order: &mut [WorkloadId], ranks: &HashMap<WorkloadId, (f64, u64)>) {
+fn settle_order(order: &mut [WorkloadId], ranks: &HashMap<WorkloadId, Rank>) {
     for _ in 0..order.len() {
         let mut moved = false;
         for index in 1..order.len() {
@@ -1948,6 +1988,39 @@ mod calm_tests {
             !m.is_animating(last + Duration::from_millis(100)),
             "constant load must settle"
         );
+    }
+
+    #[test]
+    fn faint_flickers_do_not_make_apps_hop_around_the_list() {
+        let mut m = calm_model();
+        let t0 = Instant::now();
+        let mut keys_at = |tick: u64| {
+            let (x, y) = if tick % 2 == 0 { (3, 0) } else { (0, 3) };
+            feed_at(
+                &mut m,
+                t0 + Duration::from_secs(tick),
+                10,
+                9 * GIB,
+                vec![
+                    app("big-idle", 1, 5 * GIB, 0),
+                    app("x", 2, GIB, x),
+                    app("y", 3, 2 * GIB, y),
+                    app("small-idle", 4, GIB / 2, 0),
+                ],
+            );
+            m.devices[0]
+                .workloads
+                .iter()
+                .map(|w| w.key.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut settled = Vec::new();
+        for tick in 0..40 {
+            settled = keys_at(tick);
+        }
+        for tick in 40..160 {
+            assert_eq!(keys_at(tick), settled, "tick {tick}");
+        }
     }
 
     #[test]
