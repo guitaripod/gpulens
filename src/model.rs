@@ -191,36 +191,57 @@ pub struct Model {
     pub devices: Vec<DeviceView>,
     pub interval: Duration,
     pub ticks: u64,
-    registry: Registry,
+    registries: Vec<Registry>,
+    history: Duration,
     capacity: usize,
 }
 
 impl Model {
     pub fn new(infos: Vec<DeviceInfo>, interval: Duration, history: Duration) -> Self {
-        let capacity = (history.as_secs_f64() / interval.as_secs_f64())
-            .ceil()
-            .max(2.0) as usize;
+        let devices: Vec<DeviceView> = infos.into_iter().map(DeviceView::new).collect();
         Self {
-            devices: infos.into_iter().map(DeviceView::new).collect(),
+            registries: devices.iter().map(|_| Registry::default()).collect(),
+            devices,
             interval,
             ticks: 0,
-            registry: Registry::default(),
-            capacity,
+            history,
+            capacity: frames_for(history, interval),
         }
     }
 
-    pub fn name_of(&self, id: WorkloadId) -> &str {
-        self.registry
+    /// Changes the sampling interval. Frames recorded at the old rate would be misread at the new one, so history restarts and idle timers are rescaled.
+    pub fn set_interval(&mut self, interval: Duration) {
+        if interval == self.interval {
+            return;
+        }
+        let ratio = self.interval.as_secs_f64() / interval.as_secs_f64();
+        for device in &mut self.devices {
+            device.frames.clear();
+            for ticks in device.idle_ticks.values_mut() {
+                *ticks = (f64::from(*ticks) * ratio).round() as u32;
+            }
+        }
+        self.interval = interval;
+        self.capacity = frames_for(self.history, interval);
+    }
+
+    pub fn name_of(&self, position: usize, id: WorkloadId) -> &str {
+        self.registries[position]
             .entries
             .get(id as usize)
             .map_or("?", |e| e.name.as_str())
     }
 
-    pub fn slot_of(&self, id: WorkloadId) -> Slot {
-        self.registry
+    pub fn slot_of(&self, position: usize, id: WorkloadId) -> Slot {
+        self.registries[position]
             .entries
             .get(id as usize)
             .map_or(Slot::Other, |e| e.slot)
+    }
+
+    /// How many frames of history are kept.
+    pub fn history_frames(&self) -> usize {
+        self.capacity
     }
 
     /// Seconds of history one frame stands for.
@@ -245,11 +266,11 @@ impl Model {
     }
 
     fn ingest_device(&mut self, position: usize, sample: DeviceSample, procs: Vec<ObservedProc>) {
-        let mut workloads = self.group_into_workloads(procs);
+        let mut workloads = self.group_into_workloads(position, procs);
         self.update_idle_counters(position, &mut workloads);
         self.assign_slots(position, &mut workloads);
         disambiguate_names(&mut workloads);
-        self.remember_display_names(&workloads);
+        self.remember_display_names(position, &workloads);
         sort_by_impact(&mut workloads);
 
         let frame = Frame {
@@ -273,7 +294,7 @@ impl Model {
         }
     }
 
-    fn group_into_workloads(&mut self, procs: Vec<ObservedProc>) -> Vec<Workload> {
+    fn group_into_workloads(&mut self, position: usize, procs: Vec<ObservedProc>) -> Vec<Workload> {
         let mut groups: Vec<(String, Vec<ObservedProc>)> = Vec::new();
         for observed in procs {
             match groups
@@ -286,11 +307,16 @@ impl Model {
         }
         groups
             .into_iter()
-            .map(|(key, members)| self.build_workload(key, members))
+            .map(|(key, members)| self.build_workload(position, key, members))
             .collect()
     }
 
-    fn build_workload(&mut self, key: String, mut members: Vec<ObservedProc>) -> Workload {
+    fn build_workload(
+        &mut self,
+        position: usize,
+        key: String,
+        mut members: Vec<ObservedProc>,
+    ) -> Workload {
         members.sort_by(|a, b| {
             b.proc
                 .mem_bytes
@@ -299,7 +325,7 @@ impl Model {
                 .then(a.proc.pid.cmp(&b.proc.pid))
         });
         let identity = members[0].identity.clone();
-        let id = self.registry.intern(&identity);
+        let id = self.registries[position].intern(&identity);
         let total = |pick: fn(&ObservedProc) -> u8| -> u8 {
             members
                 .iter()
@@ -349,15 +375,16 @@ impl Model {
         order.sort_by_key(|&i| std::cmp::Reverse((workloads[i].sm, workloads[i].mem_bytes)));
         let mut taken: HashSet<u8> = HashSet::new();
         for workload in workloads.iter() {
-            if let Slot::Color(slot) = self.registry.entries[workload.id as usize].slot {
+            if let Slot::Color(slot) = self.registries[position].entries[workload.id as usize].slot
+            {
                 taken.insert(slot);
             }
         }
         let present: HashSet<WorkloadId> = workloads.iter().map(|w| w.id).collect();
-        for entry_id in 0..self.registry.entries.len() as WorkloadId {
+        for entry_id in 0..self.registries[position].entries.len() as WorkloadId {
             if !present.contains(&entry_id) {
-                self.registry.entries[entry_id as usize].slot =
-                    match self.registry.entries[entry_id as usize].slot {
+                self.registries[position].entries[entry_id as usize].slot =
+                    match self.registries[position].entries[entry_id as usize].slot {
                         Slot::Color(slot) if !taken.contains(&slot) => Slot::Color(slot),
                         _ => Slot::Other,
                     };
@@ -365,23 +392,24 @@ impl Model {
         }
         for &index in &order {
             let id = workloads[index].id as usize;
-            if self.registry.entries[id].slot == Slot::Other
+            if self.registries[position].entries[id].slot == Slot::Other
                 && let Some(free) = (0..COLOR_SLOTS).find(|s| !taken.contains(s))
             {
-                self.registry.entries[id].slot = Slot::Color(free);
+                self.registries[position].entries[id].slot = Slot::Color(free);
                 taken.insert(free);
             }
         }
         self.reclaim_slots_for_important(position, workloads);
         for workload in workloads.iter_mut() {
-            workload.slot = self.registry.entries[workload.id as usize].slot;
+            workload.slot = self.registries[position].entries[workload.id as usize].slot;
         }
     }
 
     /// The history legend and chart refer to apps by name, so it must be the disambiguated one.
-    fn remember_display_names(&mut self, workloads: &[Workload]) {
+    fn remember_display_names(&mut self, position: usize, workloads: &[Workload]) {
         for workload in workloads {
-            self.registry.entries[workload.id as usize].name = workload.display_name.clone();
+            self.registries[position].entries[workload.id as usize].name =
+                workload.display_name.clone();
         }
     }
 
@@ -413,21 +441,34 @@ impl Model {
         needy.sort_by_key(|w| std::cmp::Reverse(score(w.id)));
         for candidate in needy {
             let wanted = score(candidate.id);
-            if wanted == 0 || self.registry.entries[candidate.id as usize].slot != Slot::Other {
+            if wanted == 0
+                || self.registries[position].entries[candidate.id as usize].slot != Slot::Other
+            {
                 continue;
             }
             let victim = workloads
                 .iter()
-                .filter(|w| matches!(self.registry.entries[w.id as usize].slot, Slot::Color(_)))
+                .filter(|w| {
+                    matches!(
+                        self.registries[position].entries[w.id as usize].slot,
+                        Slot::Color(_)
+                    )
+                })
                 .filter(|w| score(w.id) * 3 <= wanted)
                 .min_by_key(|w| (score(w.id), w.mem_bytes));
             if let Some(victim) = victim {
-                let slot = self.registry.entries[victim.id as usize].slot;
-                self.registry.entries[victim.id as usize].slot = Slot::Other;
-                self.registry.entries[candidate.id as usize].slot = slot;
+                let slot = self.registries[position].entries[victim.id as usize].slot;
+                self.registries[position].entries[victim.id as usize].slot = Slot::Other;
+                self.registries[position].entries[candidate.id as usize].slot = slot;
             }
         }
     }
+}
+
+fn frames_for(history: Duration, interval: Duration) -> usize {
+    (history.as_secs_f64() / interval.as_secs_f64())
+        .ceil()
+        .max(2.0) as usize
 }
 
 /// Two workloads with the same friendly name (two vLLM containers) get a suffix so they can be told apart.
@@ -731,8 +772,8 @@ mod tests {
         );
         feed(&mut m, 15, 2 * GIB, vec![a, b]);
         let ids: Vec<_> = m.devices[0].workloads.iter().map(|w| w.id).collect();
-        assert_eq!(m.name_of(ids[0]), "vLLM · aaaaaa");
-        assert_eq!(m.name_of(ids[1]), "vLLM · bbbbbb");
+        assert_eq!(m.name_of(0, ids[0]), "vLLM · aaaaaa");
+        assert_eq!(m.name_of(0, ids[1]), "vLLM · bbbbbb");
     }
 
     #[test]
@@ -812,11 +853,67 @@ mod tests {
     }
 
     #[test]
+    fn colours_are_independent_per_gpu() {
+        let mut m = Model::new(
+            vec![device_info(), device_info()],
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+        );
+        let on_first = |i: u32| {
+            observed(
+                i,
+                identity(&format!("a{i}"), &format!("A{i}"), Category::Ai),
+                GIB,
+                30,
+            )
+        };
+        let mut on_second = observed(50, identity("b", "B", Category::Game), GIB, 30);
+        on_second.proc.device = 1;
+        for _ in 0..3 {
+            m.ingest(Observation {
+                devices: vec![sample(60, 2 * GIB), sample(30, GIB)],
+                processes: vec![on_first(1), on_first(2), on_second.clone()],
+            });
+        }
+        let slots_first: Vec<_> = m.devices[0].workloads.iter().map(|w| w.slot).collect();
+        assert_ne!(slots_first[0], slots_first[1]);
+        assert_eq!(
+            m.slot_of(1, m.devices[1].workloads[0].id),
+            m.devices[1].workloads[0].slot
+        );
+        assert_eq!(m.devices[1].workloads[0].slot, Slot::Color(0));
+    }
+
+    #[test]
+    fn changing_the_interval_restarts_history_and_rescales_idle_time() {
+        let mut m = model();
+        for _ in 0..10 {
+            feed(
+                &mut m,
+                0,
+                GIB,
+                vec![observed(1, identity("a", "A", Category::Ai), GIB, 0)],
+            );
+        }
+        assert_eq!(m.devices[0].workloads[0].idle_ticks, 10);
+        m.set_interval(Duration::from_millis(250));
+        assert!(m.devices[0].frames.is_empty());
+        feed(
+            &mut m,
+            0,
+            GIB,
+            vec![observed(1, identity("a", "A", Category::Ai), GIB, 0)],
+        );
+        assert_eq!(m.devices[0].workloads[0].idle_ticks, 41);
+        assert_eq!(m.interval, Duration::from_millis(250));
+    }
+
+    #[test]
     fn registry_keeps_names_for_workloads_that_left() {
         let mut m = model();
         feed(&mut m, 10, GIB, vec![observed(1, vllm(), GIB, 10)]);
         let id = m.devices[0].workloads[0].id;
         feed(&mut m, 0, 0, vec![]);
-        assert_eq!(m.name_of(id), "vLLM");
+        assert_eq!(m.name_of(0, id), "vLLM");
     }
 }

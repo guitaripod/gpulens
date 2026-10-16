@@ -90,7 +90,7 @@ fn render_text(buf: &mut Buffer, area: Rect, workload: &Workload, app: &App) {
     for line in format::wrap(&description, width, 2) {
         put(buf, &line, theme.dim(), &mut y);
     }
-    if let Some(explanation) = app.ai.explanations.get(&workload.key) {
+    if let Some(explanation) = app.explanation_for(&workload.key) {
         for (index, line) in format::wrap(explanation, width.saturating_sub(2), 3)
             .into_iter()
             .enumerate()

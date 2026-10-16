@@ -202,8 +202,6 @@ fn many_workloads_scroll_with_the_selection() {
 }
 
 fn two_gpu_app() -> App {
-    use std::time::Instant;
-
     use crate::model::Observation;
     use crate::model::testing::{GIB, identity, observed, sample};
     use crate::types::Category;

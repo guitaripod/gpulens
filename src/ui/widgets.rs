@@ -135,11 +135,9 @@ pub fn labeled_bar(
     if theme.is_mono() || area.width == 0 {
         return;
     }
-    let cells = stack::resolve_horizontal(&segments, total, usize::from(area.width));
-    for (segment, caption) in items {
-        let Some((start, len)) = longest_solid_run(&cells, segment.tag) else {
-            continue;
-        };
+    let spans = whole_cell_spans(&segments, total, usize::from(area.width));
+    for ((segment, caption), span) in items.iter().zip(spans) {
+        let Some((start, len)) = span else { continue };
         let wanted = unicode_width::UnicodeWidthStr::width(caption.as_str());
         if wanted + 2 > len {
             continue;
@@ -160,25 +158,32 @@ pub fn labeled_bar(
     }
 }
 
-/// The widest stretch of whole cells belonging to one segment, as (start, length).
-fn longest_solid_run(cells: &[Cell], tag: usize) -> Option<(usize, usize)> {
-    let mut best: Option<(usize, usize)> = None;
-    let mut run_start = 0;
-    let mut run_len = 0;
-    for (index, cell) in cells.iter().enumerate() {
-        if cell.fg == Some(tag) && cell.bg.is_none() && cell.glyph == '█' {
-            if run_len == 0 {
-                run_start = index;
-            }
-            run_len += 1;
-            if best.is_none_or(|(_, len)| run_len > len) {
-                best = Some((run_start, run_len));
-            }
-        } else {
-            run_len = 0;
-        }
+/// For each segment, the stretch of whole cells it fills, as (first cell, cell count), using the resolver's own scaling and rounding. Segments that draw nothing get `None`.
+fn whole_cell_spans(segments: &[Segment], total: f64, width: usize) -> Vec<Option<(usize, usize)>> {
+    let valid = |s: &Segment| s.value.is_finite() && s.value > 0.0;
+    let sum: f64 = segments.iter().filter(|s| valid(s)).map(|s| s.value).sum();
+    if !(total.is_finite() && total > 0.0) || sum <= 0.0 {
+        return vec![None; segments.len()];
     }
-    best
+    let scale = if sum > total { total / sum } else { 1.0 };
+    let sub_steps = width * 8;
+    let mut cumulative = 0.0;
+    let mut previous = 0usize;
+    segments
+        .iter()
+        .map(|segment| {
+            if !valid(segment) {
+                return None;
+            }
+            cumulative += segment.value * scale;
+            let end = ((cumulative / total) * sub_steps as f64).round() as usize;
+            let (start, stop) = (previous, end.min(sub_steps));
+            previous = stop;
+            let first = start.div_ceil(8);
+            let last = stop / 8;
+            (last > first).then(|| (first, last - first))
+        })
+        .collect()
 }
 
 /// One column of a stacked time series, drawn bottom-up inside `area` (a single column wide).
@@ -372,6 +377,56 @@ mod tests {
     }
 
     #[test]
+    fn segments_sharing_a_colour_each_keep_their_own_caption() {
+        let theme = Theme::new(ColorMode::TrueColor, false, false);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        let items = vec![
+            (
+                Segment {
+                    value: 40.0,
+                    tag: 8,
+                },
+                "Alpha 40%".to_string(),
+            ),
+            (
+                Segment {
+                    value: 40.0,
+                    tag: 8,
+                },
+                "Bravo 40%".to_string(),
+            ),
+        ];
+        labeled_bar(&mut buf, Rect::new(0, 0, 40, 1), &items, 100.0, &theme);
+        let line = row(&buf, 0, 40);
+        assert!(
+            line.contains("Alpha 40%") && line.contains("Bravo 40%"),
+            "{line}"
+        );
+        assert!(
+            line.find("Alpha").unwrap() < line.find("Bravo").unwrap(),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn whole_cell_spans_follow_cumulative_rounding() {
+        let segments = [
+            Segment {
+                value: 50.0,
+                tag: 0,
+            },
+            Segment { value: 0.0, tag: 1 },
+            Segment {
+                value: 25.0,
+                tag: 2,
+            },
+        ];
+        let spans = whole_cell_spans(&segments, 100.0, 20);
+        assert_eq!(spans, vec![Some((0, 10)), None, Some((10, 5))]);
+        assert_eq!(whole_cell_spans(&segments, 0.0, 20), vec![None, None, None]);
+    }
+
+    #[test]
     fn captions_only_appear_inside_wide_segments() {
         let theme = Theme::new(ColorMode::TrueColor, false, false);
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 1));
@@ -395,19 +450,6 @@ mod tests {
         let line = row(&buf, 0, 20);
         assert!(line.contains("big 60%"), "{line}");
         assert!(!line.contains("tiny"), "{line}");
-    }
-
-    #[test]
-    fn solid_run_finds_the_widest_stretch() {
-        let solid = |tag| Cell {
-            glyph: '█',
-            fg: Some(tag),
-            bg: None,
-        };
-        let cells = vec![solid(0), solid(1), solid(1), solid(1), solid(0), solid(0)];
-        assert_eq!(longest_solid_run(&cells, 1), Some((1, 3)));
-        assert_eq!(longest_solid_run(&cells, 0), Some((4, 2)));
-        assert_eq!(longest_solid_run(&cells, 7), None);
     }
 
     #[test]

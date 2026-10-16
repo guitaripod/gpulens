@@ -273,6 +273,47 @@ const DESKTOP_RULES: &[Rule] = &[
         Category::Desktop,
         COMPOSITOR,
     ),
+    rule(
+        &[Test::Exe("xfwm4")],
+        "desktop:xfwm4",
+        "Xfce window manager",
+        Category::Desktop,
+        COMPOSITOR,
+    ),
+    rule(
+        &[Test::Exe("river")],
+        "desktop:river",
+        "river",
+        Category::Desktop,
+        COMPOSITOR,
+    ),
+    rule(
+        &[Test::Exe("cage")],
+        "desktop:cage",
+        "cage",
+        Category::Desktop,
+        COMPOSITOR,
+    ),
+    rule(
+        &[Test::Exe("xvfb"), Test::Exe("xephyr"), Test::Exe("xvnc")],
+        "desktop:xvirtual",
+        "Virtual X server",
+        Category::Desktop,
+        COMPOSITOR,
+    ),
+    rule(
+        &[
+            Test::Exe("sddm-greeter"),
+            Test::Exe("sddm-greeter-qt6"),
+            Test::Exe("gdm-wayland-session"),
+            Test::Exe("gdm-x-session"),
+            Test::Exe("lightdm-gtk-greeter"),
+        ],
+        "desktop:greeter",
+        "Login screen",
+        Category::Desktop,
+        "The login screen that starts your desktop session.",
+    ),
 ];
 
 const AI_RULES: &[Rule] = &[

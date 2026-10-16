@@ -15,7 +15,7 @@ nvtop and nvidia-smi list process IDs and numbers. gpulens groups processes into
 - **Plain descriptions.** Every row says what the program is: "Serves a large language model; memory stays reserved while it waits for requests."
 - **Grouping that makes sense.** Chromium helper processes, Steam's many processes or two vLLM containers become one row each, with the container id as the tie-breaker.
 - **Hardware at a glance.** Power against limit, temperature, clocks, PCIe traffic, video encoder and decoder load, and a plain-language reason if the card is being held back.
-- **Safe actions.** Stop an app from the list. It asks first, never offers desktop or system apps, never touches another user's processes, and checks the process is still the one you saw.
+- **Safe actions.** Stop an app from the list. It asks first (an explicit `y`; Enter does nothing), never offers desktop or system apps, never touches another user's processes unless you run gpulens as root, and checks the process is still the one you saw.
 - **Scriptable.** `gpulens snapshot --json` prints the same picture for scripts and agents.
 
 NVIDIA GPUs only for now (through NVML). Linux only.
@@ -50,8 +50,8 @@ gpulens doctor          # check everything gpulens relies on
 | `t` | history window: 1m, 5m, 15m, 1h |
 | `/` | filter by name, kind or command |
 | `d` / `a` | show or hide the one-line explanations / AI wording or plain wording |
-| `space` | pause the picture (sampling continues, nothing is lost) |
-| `+` `-` | sample faster or slower |
+| `space` | pause the picture (sampling continues; up to the history length is kept and replayed on resume) |
+| `+` `-` | sample faster or slower (restarts the history, since frames at different rates cannot be mixed) |
 | `x` | stop the chosen app (asks first) |
 | `e` | ask the AI helper why the chosen app is using the GPU |
 | `Tab` or `[` `]` | next or previous GPU |
@@ -66,7 +66,8 @@ Colours follow the terminal's capabilities (truecolor, 256, 16, or none with `NO
 - **VRAM** per app is what the driver reports for each process. The card also reserves some memory for itself, shown as "reserved".
 - **Encoder and decoder** load is shown when an app uses the video engines (recording, streaming, transcoding), even if its shader load is zero.
 - Inside a container the driver only reports processes visible to the host, so run with `--pid=host` if the list is empty. Processes gpulens cannot read in `/proc` show as "process 1234".
-- MIG partitions and unified-memory systems report differently; gpulens shows "n/a" instead of inventing a figure.
+- Some GPUs (older cards, MIG, virtual GPUs) cannot report per-process utilisation. gpulens says so in the headline and shows memory only, rather than inventing figures. Unified-memory systems are not specially handled yet.
+- The driver reports each process roughly once a second, and only while it is doing something. gpulens keeps the last figure for a moment so fast sampling does not flicker.
 
 ## The AI helper
 

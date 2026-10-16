@@ -106,6 +106,7 @@ fn render_chart(buf: &mut Buffer, area: Rect, app: &App, metric: Metric) {
     }
     let data = build(
         &app.model,
+        app.device,
         device,
         metric,
         usize::from(plot.width),
@@ -165,12 +166,12 @@ fn render_legend(buf: &mut Buffer, area: Rect, app: &App) {
         .into_iter()
         .take(8)
     {
-        let name = format::truncate(app.model.name_of(id), 18);
+        let name = format::truncate(app.model.name_of(app.device, id), 18);
         let needed = 2 + unicode_width::UnicodeWidthStr::width(name.as_str()) as u16 + 2;
         if x + needed > limit {
             break;
         }
-        let (swatch, style) = widgets::swatch(theme, app.model.slot_of(id));
+        let (swatch, style) = widgets::swatch(theme, app.model.slot_of(app.device, id));
         widgets::text(buf, x, area.y, &swatch, style, 1);
         x += 2;
         x += widgets::text(buf, x, area.y, &name, theme.dim(), limit - x) + 2;
@@ -201,6 +202,7 @@ pub fn ranked_in_window(
 /// Averages history into one column per terminal cell. The newest frame lands in the last column; a short history leaves the left side empty.
 pub fn build(
     model: &Model,
+    position: usize,
     device: &DeviceView,
     metric: Metric,
     width: usize,
@@ -221,13 +223,18 @@ pub fn build(
             if from < offset && to <= offset || lo >= hi {
                 return Vec::new();
             }
-            column_segments(model, &frames[lo..hi], metric)
+            column_segments(model, position, &frames[lo..hi], metric)
         })
         .collect();
     ChartData { columns, total }
 }
 
-fn column_segments(model: &Model, frames: &[&Frame], metric: Metric) -> Vec<Segment> {
+fn column_segments(
+    model: &Model,
+    position: usize,
+    frames: &[&Frame],
+    metric: Metric,
+) -> Vec<Segment> {
     let count = frames.len() as f64;
     let mut sums: Vec<(WorkloadId, f64)> = Vec::new();
     let mut device_total = 0.0;
@@ -253,11 +260,18 @@ fn column_segments(model: &Model, frames: &[&Frame], metric: Metric) -> Vec<Segm
         .filter(|(_, sum)| *sum > 0.0)
         .map(|(id, sum)| Segment {
             value: sum / count,
-            tag: tag_for(model.slot_of(*id)),
+            tag: tag_for(model.slot_of(position, *id)),
         })
         .collect();
     let claimed: f64 = segments.iter().map(|s| s.value).sum();
-    let hidden = device_total / count - claimed;
+    let device_average = device_total / count;
+    if metric == Metric::Compute && claimed > device_average && claimed > 0.0 {
+        let scale = device_average / claimed;
+        for segment in &mut segments {
+            segment.value *= scale;
+        }
+    }
+    let hidden = device_average - claimed;
     if hidden > 0.0 {
         segments.push(Segment {
             value: hidden,
@@ -292,7 +306,7 @@ mod tests {
     #[test]
     fn short_history_is_right_aligned() {
         let m = busy_model(10);
-        let data = build(&m, &m.devices[0], Metric::Compute, 60, 60);
+        let data = build(&m, 0, &m.devices[0], Metric::Compute, 60, 60);
         assert_eq!(data.columns.len(), 60);
         assert!(data.columns[..45].iter().all(Vec::is_empty));
         assert!(!data.columns[59].is_empty());
@@ -301,7 +315,7 @@ mod tests {
     #[test]
     fn columns_stack_apps_then_unclaimed_remainder() {
         let m = busy_model(5);
-        let data = build(&m, &m.devices[0], Metric::Compute, 10, 5);
+        let data = build(&m, 0, &m.devices[0], Metric::Compute, 10, 5);
         let column = &data.columns[9];
         assert_eq!(column.len(), 3);
         assert_eq!(column[0].value, 40.0);
@@ -311,9 +325,26 @@ mod tests {
     }
 
     #[test]
+    fn compute_columns_never_show_more_than_the_card_reports() {
+        let mut m = model();
+        feed(
+            &mut m,
+            50,
+            GIB,
+            vec![
+                observed(1, identity("a", "A", Category::Ai), GIB / 2, 40),
+                observed(2, identity("b", "B", Category::Game), GIB / 2, 40),
+            ],
+        );
+        let data = build(&m, 0, &m.devices[0], Metric::Compute, 2, 2);
+        let total: f64 = data.columns[1].iter().map(|s| s.value).sum();
+        assert!((total - 50.0).abs() < 1e-9, "{total}");
+    }
+
+    #[test]
     fn memory_chart_uses_the_card_size_as_total() {
         let m = busy_model(3);
-        let data = build(&m, &m.devices[0], Metric::Memory, 6, 3);
+        let data = build(&m, 0, &m.devices[0], Metric::Memory, 6, 3);
         assert_eq!(data.total, 96.0 * GIB as f64);
         let column = &data.columns[5];
         assert_eq!(column[0].value, 6.0 * GIB as f64);
@@ -322,7 +353,7 @@ mod tests {
     #[test]
     fn long_windows_average_many_frames_per_column() {
         let m = busy_model(60);
-        let data = build(&m, &m.devices[0], Metric::Compute, 6, 60);
+        let data = build(&m, 0, &m.devices[0], Metric::Compute, 6, 60);
         assert!(data.columns.iter().all(|c| !c.is_empty()));
         assert!((data.columns[0][0].value - 40.0).abs() < 1e-9);
     }
@@ -349,7 +380,7 @@ mod tests {
         );
         let ranked: Vec<_> = ranked_in_window(&m.devices[0], 10)
             .into_iter()
-            .map(|(id, _)| m.name_of(id).to_string())
+            .map(|(id, _)| m.name_of(0, id).to_string())
             .collect();
         assert_eq!(ranked, vec!["B", "A"]);
     }
@@ -357,7 +388,7 @@ mod tests {
     #[test]
     fn empty_history_gives_empty_columns() {
         let m = model();
-        let data = build(&m, &m.devices[0], Metric::Compute, 8, 30);
+        let data = build(&m, 0, &m.devices[0], Metric::Compute, 8, 30);
         assert!(data.columns.iter().all(Vec::is_empty));
     }
 }

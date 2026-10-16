@@ -10,14 +10,14 @@ expression: "render(&mut app, 150, 46)"
  VRAM  █████████vLLM · 3f2a9c 30.1 GB█████████▍████vLLM · b81c0e 22.7 GB███████████████▊██████████▊██████▊██▊▎█▎                     79.7 / 95.6 GB
 ┌ Who is using the GPU ───────────────────────────────── sort: impact · 11 shown ┐┌ Who used the GPU · last 5m00s ────────────── t window · m metric ┐
 │    APP                                KIND     STATE       GPU TIME        VRAM││ GPU time used                                                    │
-│▶█  vLLM · 3f2a9c                      AI       ● busy      ██▊    55%   30.1 GB││ 100%                        ▄▃   ▁▂▂        ▆▆▆▇▇▇▇▇▆▆▆▆▆▆▆▆▆▇▇▇ │
-│    Serves a large language model; memory stays reserved while it waits for re… ││                             ▁▄▁▃▂▅█▂▃       ████████████████████ │
-│ █  ComfyUI                            AI       ● busy      █▋     32%    9.0 GB││                             ▃▁▃▃█▃▇█▃    ▂  ▇███████████████████ │
-│    Node-based image and video generation server; keeps models loaded between … ││                             ██▇▂▆███▅▄ ▂▃▂▃▂█▁█████████▁▂▁▁▃▆▄▅▂ │
-│ █  vLLM · b81c0e                      AI       ● busy      █▌     31%   22.7 GB││                             ▃▄▇██████▆▃▃▄▅▄▂█▄▃▄▇▇▄▄▅▄▂▄▄▁▁▃█▇██ │
+│▶█  vLLM · 3f2a9c                      AI       ● busy      ██▊    55%   30.1 GB││ 100%                        ▄▃   ▁▂▂         ▆▆▇▇▇▇▇▆▆▆▆▆▆▆▆▆▇▇▇ │
+│    Serves a large language model; memory stays reserved while it waits for re… ││                             ▁▄▁▃▂▅█▂▃       ▂███████████████████ │
+│ █  ComfyUI                            AI       ● busy      █▋     32%    9.0 GB││                             ▃▁▃▃█▃▇█▃    ▂  ████████████████████ │
+│    Node-based image and video generation server; keeps models loaded between … ││                             ██▇▂▆███▅▄ ▂▃▂▃▂▃▁█████████▁▂▁▁▃▆▄▅▂ │
+│ █  vLLM · b81c0e                      AI       ● busy      █▌     31%   22.7 GB││                             ▃▄▇██████▆▃▃▄▅▄▂▅▄▃▄▇▇▄▄▅▄▂▄▄▁▁▃█▇██ │
 │    Serves a large language model; memory stays reserved while it waits for re… ││                             █████████▁▂▃▃▃▂▁██▅▅█▇▄▃▆▁▅█████▁██▁ │
 │ █  Counter Strike Global Offensive    Game     ◐ working   █▏     22%    8.4 GB││                             █████▂▄▆▇███████▇▁████████████▁▅▁▂▅█ │
-│    A game running through Steam.                                               ││  50%                        ▂▃▅▆█████████████▁▄▃▂███▄█▂▇▇▇██████ │
+│    A game running through Steam.                                               ││  50%                        ▂▃▅▆████████████▇▁▄▃▂███▄█▂▇▇▇██████ │
 │ █  KWin compositor                    Desktop  ◐ working   ▎       6%    380 MB││                             █████████████████████▇▄▅▃▂█████████▁ │
 │    Draws your desktop windows and effects.                                     ││                             ██████████████████████████▆▅▅▄▅▇▄▄▆█ │
 │ █  Sunshine                           Video    • light             1%    564 MB││                             ████████████████████████████████████ │

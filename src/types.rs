@@ -30,6 +30,7 @@ pub struct Throttle {
     pub power: bool,
     pub thermal: bool,
     pub hardware: bool,
+    pub unknown: bool,
 }
 
 impl Throttle {

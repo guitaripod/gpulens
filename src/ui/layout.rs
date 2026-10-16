@@ -85,7 +85,7 @@ fn split_main(main: Rect) -> (Rect, Option<Rect>) {
     if main.width < WIDE_WIDTH {
         return (main, None);
     }
-    let table_width = (main.width * 55 / 100).max(MIN_TABLE_WIDTH);
+    let table_width = ((u32::from(main.width) * 55 / 100) as u16).max(MIN_TABLE_WIDTH);
     let table = Rect::new(main.x, main.y, table_width, main.height);
     let timeline = Rect::new(
         main.x + table_width,

@@ -151,6 +151,9 @@ impl<'a> Row<'a> {
     }
 
     fn status(&mut self, sample: &DeviceSample) {
+        if sample.throttle.unknown {
+            return;
+        }
         let theme = &self.app.theme;
         let (text, style) = if sample.throttle.thermal {
             ("too hot, slowing down", theme.bad())

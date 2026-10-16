@@ -1,6 +1,7 @@
 //! NVML-backed sampling. The driver library is loaded at runtime, so the binary starts on machines without NVIDIA.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use nvml_wrapper::bitmasks::device::ThrottleReasons;
 use nvml_wrapper::enum_wrappers::device::{
@@ -16,10 +17,13 @@ use crate::types::{
     ContextKind, DeviceInfo, DeviceSample, EngineUtil, GpuProcess, Pid, RawSample, Throttle,
 };
 
+const UTIL_HOLD: Duration = Duration::from_millis(1600);
+
 pub struct NvmlBackend {
     nvml: Nvml,
     infos: Vec<DeviceInfo>,
     last_seen_us: Vec<u64>,
+    held: Vec<HashMap<Pid, (EngineUtil, Instant)>>,
 }
 
 impl NvmlBackend {
@@ -36,10 +40,12 @@ impl NvmlBackend {
             infos.push(read_info(&device, index, &driver));
         }
         let last_seen_us = vec![0; infos.len()];
+        let held = infos.iter().map(|_| HashMap::new()).collect();
         Ok(Self {
             nvml,
             infos,
             last_seen_us,
+            held,
         })
     }
 }
@@ -54,14 +60,19 @@ impl GpuBackend for NvmlBackend {
             nvml,
             infos,
             last_seen_us,
+            held,
         } = self;
         let mut devices = Vec::with_capacity(infos.len());
         let mut processes = Vec::new();
         for (position, info) in infos.iter().enumerate() {
             let device = nvml.device_by_index(info.index).map_err(other)?;
             let mut sample = read_sample(&device, position)?;
-            let (found, unsupported) =
-                read_processes(&device, position, &mut last_seen_us[position])?;
+            let (found, unsupported) = read_processes(
+                &device,
+                position,
+                &mut last_seen_us[position],
+                &mut held[position],
+            )?;
             sample.per_process_unsupported = unsupported;
             devices.push(sample);
             processes.extend(found);
@@ -144,7 +155,10 @@ fn read_sample(device: &Device, position: usize) -> Result<DeviceSample, Backend
         pcie_rx_kbps: optional(device.pcie_throughput(PcieUtilCounter::Receive), position)?,
         throttle: optional(device.current_throttle_reasons(), position)?
             .map(throttle_from)
-            .unwrap_or_default(),
+            .unwrap_or(Throttle {
+                unknown: true,
+                ..Throttle::default()
+            }),
         per_process_unsupported: false,
     })
 }
@@ -166,6 +180,7 @@ fn throttle_from(reasons: ThrottleReasons) -> Throttle {
             ThrottleReasons::SW_THERMAL_SLOWDOWN | ThrottleReasons::HW_THERMAL_SLOWDOWN,
         ),
         hardware: reasons.contains(ThrottleReasons::HW_SLOWDOWN),
+        unknown: false,
     }
 }
 
@@ -173,10 +188,12 @@ fn read_processes(
     device: &Device,
     position: usize,
     last_seen_us: &mut u64,
+    held: &mut HashMap<Pid, (EngineUtil, Instant)>,
 ) -> Result<(Vec<GpuProcess>, bool), BackendError> {
-    let compute = optional(device.running_compute_processes(), position)?.unwrap_or_default();
-    let graphics = optional(device.running_graphics_processes(), position)?.unwrap_or_default();
-    let (utilization, unsupported) = read_utilization(device, position, last_seen_us)?;
+    let compute = process_list(device.running_compute_processes(), position)?;
+    let graphics = process_list(device.running_graphics_processes(), position)?;
+    let (fresh, unsupported) = read_utilization(device, position, last_seen_us)?;
+    let utilization = merge_held(held, fresh, Instant::now());
 
     let mut by_pid: HashMap<Pid, GpuProcess> = HashMap::new();
     for (list, kind) in [
@@ -214,6 +231,31 @@ fn merge_context(existing: &mut GpuProcess, kind: ContextKind, memory: Option<u6
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
     };
+}
+
+/// A GPU that has no such list (compute-only cards have no graphics contexts) simply has none; any other failure must surface instead of passing for "nothing is using the GPU".
+fn process_list<T>(
+    result: Result<Vec<T>, NvmlError>,
+    position: usize,
+) -> Result<Vec<T>, BackendError> {
+    match result {
+        Ok(list) => Ok(list),
+        Err(NvmlError::NotSupported) => Ok(Vec::new()),
+        Err(error) => Err(lost_or_other(error, position)),
+    }
+}
+
+/// The driver reports a process only in sampling periods where it did something, roughly once a second. Polling faster than that would make busy processes flicker to zero between samples, so the last figure is kept for a moment.
+fn merge_held(
+    held: &mut HashMap<Pid, (EngineUtil, Instant)>,
+    fresh: HashMap<Pid, EngineUtil>,
+    now: Instant,
+) -> HashMap<Pid, EngineUtil> {
+    for (pid, util) in fresh {
+        held.insert(pid, (util, now));
+    }
+    held.retain(|_, (_, seen)| now.duration_since(*seen) <= UTIL_HOLD);
+    held.iter().map(|(pid, (util, _))| (*pid, *util)).collect()
 }
 
 /// Per-process busy figures, plus whether this GPU can report them at all (older cards, MIG and some virtual GPUs cannot).
@@ -295,6 +337,66 @@ mod tests {
         let result = average_per_process(&samples);
         assert_eq!(result[&1].sm, 100);
         assert_eq!(result[&2].sm, 25);
+    }
+
+    #[test]
+    fn utilisation_is_held_briefly_between_driver_samples() {
+        let start = Instant::now();
+        let util = |sm| EngineUtil {
+            sm,
+            ..EngineUtil::default()
+        };
+        let mut held = HashMap::new();
+        let first = merge_held(&mut held, HashMap::from([(7, util(60))]), start);
+        assert_eq!(first[&7].sm, 60);
+        let gap = merge_held(
+            &mut held,
+            HashMap::new(),
+            start + Duration::from_millis(1000),
+        );
+        assert_eq!(gap[&7].sm, 60);
+        let gone = merge_held(
+            &mut held,
+            HashMap::new(),
+            start + Duration::from_millis(2000),
+        );
+        assert!(gone.is_empty());
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn a_fresh_sample_replaces_the_held_one() {
+        let start = Instant::now();
+        let util = |sm| EngineUtil {
+            sm,
+            ..EngineUtil::default()
+        };
+        let mut held = HashMap::new();
+        merge_held(&mut held, HashMap::from([(7, util(60))]), start);
+        let next = merge_held(
+            &mut held,
+            HashMap::from([(7, util(10))]),
+            start + Duration::from_millis(500),
+        );
+        assert_eq!(next[&7].sm, 10);
+    }
+
+    #[test]
+    fn process_lists_distinguish_unsupported_from_failure() {
+        assert!(
+            process_list::<u32>(Err(NvmlError::NotSupported), 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            process_list::<u32>(Err(NvmlError::GpuLost), 2),
+            Err(BackendError::GpuLost(2))
+        ));
+        assert!(matches!(
+            process_list::<u32>(Err(NvmlError::Unknown), 0),
+            Err(BackendError::Other(_))
+        ));
+        assert_eq!(process_list(Ok(vec![1u32, 2]), 0).unwrap(), vec![1, 2]);
     }
 
     #[test]

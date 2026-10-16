@@ -1,6 +1,6 @@
 //! Interface state and input handling. Drawing lives in `ui`; this module only decides what the user is looking at.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
@@ -26,7 +26,8 @@ pub const WINDOWS: [Duration; 4] = [
 ];
 const INTERVALS_MS: [u64; 6] = [250, 500, 1000, 2000, 5000, 10000];
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
-const BACKLOG_LIMIT: usize = 600;
+const NARRATION_LIFETIME: Duration = Duration::from_secs(90);
+const EXPLANATION_LIFETIME: Duration = Duration::from_secs(180);
 const STALE_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,13 +92,20 @@ pub struct Narration {
     pub situation: u64,
     pub headline: String,
     pub tip: Option<String>,
+    pub at: Instant,
+}
+
+#[derive(Clone, Debug)]
+pub struct Explanation {
+    pub text: String,
+    pub at: Instant,
 }
 
 #[derive(Debug)]
 pub struct AiState {
     pub status: AiStatus,
     pub narration: Option<Narration>,
-    pub explanations: HashMap<String, String>,
+    pub explanations: HashMap<String, Explanation>,
     pub learned_this_session: Vec<String>,
     pub last_problem: Option<String>,
     narration_pending: bool,
@@ -166,12 +174,13 @@ pub struct App {
     pub toast: Option<Toast>,
     pub backend_error: Option<String>,
     pub stale_secs: Option<u64>,
+    pub too_small: bool,
     pub quit: bool,
     pub dirty: bool,
     pub hitboxes: Hitboxes,
     pub commands: Vec<Command>,
     ai_handle: Option<AiHandle>,
-    backlog: Vec<Observation>,
+    backlog: VecDeque<Observation>,
     last_observation: Option<Instant>,
 }
 
@@ -206,12 +215,13 @@ impl App {
             toast: None,
             backend_error: None,
             stale_secs: None,
+            too_small: false,
             quit: false,
             dirty: true,
             hitboxes: Hitboxes::default(),
             commands: Vec::new(),
             ai_handle,
-            backlog: Vec::new(),
+            backlog: VecDeque::new(),
             last_observation: None,
             config,
         }
@@ -231,13 +241,25 @@ impl App {
         narrate::story(&self.model.devices[self.device], self.model.interval)
     }
 
-    /// The model-written headline, but only while it still describes the current situation.
+    /// The model-written headline, but only while it still describes the current situation and is recent enough that its numbers can be trusted.
     pub fn fresh_narration(&self) -> Option<&Narration> {
+        if !self.ai_wording {
+            return None;
+        }
         let current = narrate::situation_signature(&self.model.devices[self.device]);
         self.ai
             .narration
             .as_ref()
-            .filter(|n| n.situation == current)
+            .filter(|n| n.situation == current && n.at.elapsed() < NARRATION_LIFETIME)
+    }
+
+    /// An explanation of an app, shown for a few minutes after it was written because the figures it was based on move on.
+    pub fn explanation_for(&self, key: &str) -> Option<&str> {
+        self.ai
+            .explanations
+            .get(key)
+            .filter(|e| e.at.elapsed() < EXPLANATION_LIFETIME)
+            .map(|e| e.text.as_str())
     }
 
     /// Workloads after filtering and sorting, in the order the table shows them.
@@ -312,8 +334,9 @@ impl App {
         self.backend_error = None;
         self.last_observation = Some(now);
         if self.paused {
-            if self.backlog.len() < BACKLOG_LIMIT {
-                self.backlog.push(observation);
+            self.backlog.push_back(observation);
+            if self.backlog.len() > self.model.history_frames() {
+                self.backlog.pop_front();
             }
             return;
         }
@@ -364,6 +387,13 @@ impl App {
         self.select_row(target);
     }
 
+    /// Selects by identity, not by screen position, so a click lands on the app that was drawn there even if the order has changed since.
+    fn select_key(&mut self, key: &str) {
+        if let Some(row) = self.visible().iter().position(|w| w.key == key) {
+            self.select_row(row);
+        }
+    }
+
     fn select_row(&mut self, row: usize) {
         let key = self.visible().get(row).map(|w| w.key.clone());
         if let Some(key) = key {
@@ -379,6 +409,10 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
             self.quit = true;
+            return;
+        }
+        if self.too_small && matches!(self.overlay, Overlay::ConfirmKill(_)) {
+            self.overlay = Overlay::None;
             return;
         }
         match self.overlay.clone() {
@@ -502,10 +536,14 @@ impl App {
         let next = (index + direction).clamp(0, INTERVALS_MS.len() as isize - 1) as usize;
         let interval = Duration::from_millis(INTERVALS_MS[next]);
         if interval != self.model.interval {
-            self.model.interval = interval;
+            self.model.set_interval(interval);
+            self.backlog.clear();
             self.commands.push(Command::SetInterval(interval));
             self.notify(
-                format!("Sampling every {} ms", INTERVALS_MS[next]),
+                format!(
+                    "Sampling every {} ms (history restarted)",
+                    INTERVALS_MS[next]
+                ),
                 Level::Info,
                 Instant::now(),
             );
@@ -533,8 +571,8 @@ impl App {
                     .iter()
                     .position(|(rect, _)| rect_contains(*rect, mouse.column, mouse.row));
                 if let Some(index) = hit {
-                    let row = self.scroll + index;
-                    self.select_row(row);
+                    let key = self.hitboxes.rows[index].1.clone();
+                    self.select_key(&key);
                 }
             }
             _ => {}
@@ -579,12 +617,15 @@ impl App {
                     situation,
                     headline,
                     tip,
+                    at: now,
                 });
             }
             Outcome::Explained { key, text } => {
                 self.ai.explain_pending.remove(&key);
                 self.ai.last_problem = None;
-                self.ai.explanations.insert(key, text);
+                self.ai
+                    .explanations
+                    .insert(key, Explanation { text, at: now });
             }
             Outcome::Rejected(_) => {
                 self.ai.narration_pending = false;
@@ -909,6 +950,108 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_prompt_cannot_be_confirmed_while_the_window_is_too_small_to_show_it() {
+        let mut a = app();
+        feed_three(&mut a);
+        let now = Instant::now();
+        a.handle(key(KeyCode::Char('x')), now);
+        assert!(matches!(a.overlay, Overlay::ConfirmKill(_)));
+        a.too_small = true;
+        a.handle(key(KeyCode::Char('y')), now);
+        assert!(matches!(a.overlay, Overlay::None));
+        assert!(a.toast.is_none());
+    }
+
+    #[test]
+    fn clicks_select_the_app_that_was_drawn_not_whatever_sits_there_now() {
+        use ratatui::crossterm::event::MouseEvent;
+        let mut a = app();
+        feed_three(&mut a);
+        a.hitboxes.rows = vec![
+            (Rect::new(0, 5, 40, 1), "c".to_string()),
+            (Rect::new(0, 6, 40, 1), "a".to_string()),
+        ];
+        a.handle(
+            Event::Input(TermEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 3,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            })),
+            Instant::now(),
+        );
+        assert_eq!(a.selection.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn pausing_keeps_the_newest_readings_and_drops_the_oldest() {
+        let model = Model::new(
+            vec![DeviceInfo::default()],
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        );
+        let mut a = App::new(
+            model,
+            Theme::new(crate::ui::theme::ColorMode::TrueColor, false, false),
+            Config::default(),
+            None,
+        );
+        let now = Instant::now();
+        a.handle(key(KeyCode::Char(' ')), now);
+        for load in [10, 20, 30, 40, 50] {
+            a.handle(
+                Event::Observation(Box::new(Observation {
+                    devices: vec![sample(load, GIB)],
+                    processes: vec![],
+                })),
+                now,
+            );
+        }
+        a.handle(key(KeyCode::Char(' ')), now);
+        let loads: Vec<u8> = a.model.devices[0]
+            .frames
+            .iter()
+            .map(|f| f.gpu_util)
+            .collect();
+        assert_eq!(loads, vec![30, 40, 50]);
+    }
+
+    #[test]
+    fn old_narrations_and_explanations_expire() {
+        let mut a = app();
+        feed_three(&mut a);
+        let current = narrate::situation_signature(&a.model.devices[0]);
+        let old = Instant::now()
+            .checked_sub(Duration::from_secs(600))
+            .unwrap_or_else(Instant::now);
+        a.ai.narration = Some(Narration {
+            situation: current,
+            headline: "old news".into(),
+            tip: None,
+            at: old,
+        });
+        a.ai.explanations.insert(
+            "a".into(),
+            Explanation {
+                text: "old".into(),
+                at: old,
+            },
+        );
+        if old != Instant::now() && old.elapsed() > Duration::from_secs(500) {
+            assert!(a.fresh_narration().is_none());
+            assert!(a.explanation_for("a").is_none());
+        }
+        a.ai.explanations.insert(
+            "b".into(),
+            Explanation {
+                text: "fresh".into(),
+                at: Instant::now(),
+            },
+        );
+        assert_eq!(a.explanation_for("b"), Some("fresh"));
+    }
+
+    #[test]
     fn toast_expires() {
         let mut a = app();
         let now = Instant::now();
@@ -927,6 +1070,7 @@ mod tests {
             situation: 12345,
             headline: "old".into(),
             tip: None,
+            at: Instant::now(),
         });
         assert!(a.fresh_narration().is_none());
         let current = narrate::situation_signature(&a.model.devices[0]);
@@ -934,6 +1078,7 @@ mod tests {
             situation: current,
             headline: "new".into(),
             tip: None,
+            at: Instant::now(),
         });
         assert!(a.fresh_narration().is_some());
     }
