@@ -182,10 +182,9 @@ fn parse_parameter_size(text: &str) -> Option<f32> {
     let upper = text.trim().to_ascii_uppercase();
     let (number, divisor) = if let Some(number) = upper.strip_suffix('B') {
         (number, 1.0_f32)
-    } else if let Some(number) = upper.strip_suffix('M') {
-        (number, 1000.0_f32)
     } else {
-        return None;
+        let number = upper.strip_suffix('M')?;
+        (number, 1000.0_f32)
     };
     number
         .trim()
