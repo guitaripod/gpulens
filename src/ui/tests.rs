@@ -200,3 +200,74 @@ fn many_workloads_scroll_with_the_selection() {
     let last = app.visible().last().expect("rows").display_name.clone();
     assert!(screen.contains(&last), "{screen}");
 }
+
+fn two_gpu_app() -> App {
+    use std::time::Instant;
+
+    use crate::model::Observation;
+    use crate::model::testing::{GIB, identity, observed, sample};
+    use crate::types::Category;
+
+    let infos = vec![
+        DeviceInfo {
+            index: 0,
+            name: "NVIDIA RTX 4090".into(),
+            memory_total: 24 * GIB,
+            ..DeviceInfo::default()
+        },
+        DeviceInfo {
+            index: 1,
+            name: "NVIDIA RTX 3060".into(),
+            memory_total: 12 * GIB,
+            ..DeviceInfo::default()
+        },
+    ];
+    let mut model = Model::new(infos, Duration::from_secs(1), Duration::from_secs(60));
+    let mut on_second = observed(
+        2,
+        identity("blender", "Blender", Category::Creative),
+        3 * GIB,
+        70,
+    );
+    on_second.proc.device = 1;
+    model.ingest(Observation {
+        devices: vec![sample(20, 6 * GIB), sample(80, 3 * GIB)],
+        processes: vec![
+            observed(
+                1,
+                identity("game", "Cyber Game", Category::Game),
+                6 * GIB,
+                20,
+            ),
+            on_second,
+        ],
+    });
+    let mut app = App::new(model, truecolor(), Config::default(), None);
+    app.reconcile_selection();
+    app
+}
+
+#[test]
+fn several_gpus_show_tabs_and_switch_with_tab() {
+    use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent};
+
+    use crate::event::Event;
+
+    let mut app = two_gpu_app();
+    let first = render(&mut app, 120, 36);
+    assert!(
+        first.contains("1 RTX 4090 20%") && first.contains("2 RTX 3060 80%"),
+        "{first}"
+    );
+    assert!(
+        first.contains("Cyber Game") && !first.contains("Blender  "),
+        "{first}"
+    );
+    app.handle(
+        Event::Input(TermEvent::Key(KeyEvent::from(KeyCode::Tab))),
+        std::time::Instant::now(),
+    );
+    let second = render(&mut app, 120, 36);
+    assert!(second.contains("Blender"), "{second}");
+    assert_eq!(app.device, 1);
+}
