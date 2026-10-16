@@ -358,7 +358,7 @@ pub fn narrate_with(
 ) -> Result<(String, Option<String>), JobError> {
     let prompt = narrate_prompt(facts);
     let answer: NarrateAnswer = ask(client, &prompt, "gpu_summary", &narrate_schema(), 260)?;
-    let headline = tidy(&answer.headline, 300);
+    let headline = tidy_headline(&answer.headline);
     let tip = answer.tip.map(|t| tidy(&t, 160)).filter(|t| !t.is_empty());
     let combined = format!("{headline} {}", tip.as_deref().unwrap_or(""));
     if headline.is_empty() || !narrate::is_grounded(&combined, facts) {
@@ -513,6 +513,19 @@ fn validate_classification(answer: ClassifyAnswer) -> Option<VerifiedIdentity> {
         category,
         description,
     })
+}
+
+/// A headline has room for two sentences. Models ignore length hints, so keep the first two and replace spaced dashes with commas.
+fn tidy_headline(text: &str) -> String {
+    let plain = tidy(&text.replace(" \u{2014} ", ", "), 600);
+    let mut kept = String::new();
+    for (count, sentence) in plain.split_inclusive(". ").enumerate() {
+        if count == 2 {
+            break;
+        }
+        kept.push_str(sentence);
+    }
+    kept.trim().chars().take(240).collect()
 }
 
 /// Collapses whitespace and cuts to `max` characters.
@@ -753,6 +766,17 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn headlines_keep_two_sentences_and_lose_spaced_dashes() {
+        let long = "The GPU is calm. Flaccy is the busiest app \u{2014} barely. Memory is mostly free. Everything is fine.";
+        assert_eq!(
+            tidy_headline(long),
+            "The GPU is calm. Flaccy is the busiest app, barely."
+        );
+        assert_eq!(tidy_headline("One sentence only"), "One sentence only");
+        assert!(tidy_headline(&"word ".repeat(200)).chars().count() <= 240);
     }
 
     #[test]
