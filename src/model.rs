@@ -1995,7 +1995,11 @@ mod calm_tests {
         let mut m = calm_model();
         let t0 = Instant::now();
         let mut keys_at = |tick: u64| {
-            let (x, y) = if tick % 2 == 0 { (3, 0) } else { (0, 3) };
+            let (x, y) = if tick.is_multiple_of(2) {
+                (3, 0)
+            } else {
+                (0, 3)
+            };
             feed_at(
                 &mut m,
                 t0 + Duration::from_secs(tick),
