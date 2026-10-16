@@ -28,7 +28,7 @@ pub struct ChatClient {
     agent: ureq::Agent,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ResponseFormat {
     JsonSchema,
     JsonObject,
@@ -103,7 +103,7 @@ pub(crate) fn build_agent(timeout: Duration) -> ureq::Agent {
 }
 
 fn chat_body(model: &str, req: &JsonRequest<'_>, format: ResponseFormat) -> Value {
-    json!({
+    let mut body = json!({
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt(req, format)},
@@ -113,7 +113,11 @@ fn chat_body(model: &str, req: &JsonRequest<'_>, format: ResponseFormat) -> Valu
         "max_tokens": req.max_tokens,
         "stream": false,
         "response_format": response_format(req, format),
-    })
+    });
+    if format == ResponseFormat::JsonSchema {
+        body["chat_template_kwargs"] = json!({"enable_thinking": false});
+    }
+    body
 }
 
 fn system_prompt(req: &JsonRequest<'_>, format: ResponseFormat) -> String {
@@ -307,6 +311,23 @@ mod tests {
             }
         );
         mock.assert_calls(1);
+    }
+
+    #[test]
+    fn schema_requests_switch_off_model_thinking_and_the_fallback_does_not() {
+        let schema = json!({"type": "object"});
+        let req = JsonRequest {
+            system: "s",
+            user: "u",
+            schema_name: "n",
+            schema: &schema,
+            max_tokens: 10,
+            temperature: 0.0,
+        };
+        let first = chat_body("m", &req, ResponseFormat::JsonSchema);
+        assert_eq!(first["chat_template_kwargs"]["enable_thinking"], false);
+        let fallback = chat_body("m", &req, ResponseFormat::JsonObject);
+        assert!(fallback.get("chat_template_kwargs").is_none());
     }
 
     #[test]
