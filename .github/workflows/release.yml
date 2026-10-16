@@ -22,8 +22,14 @@ jobs:
           cp target/release/gpulens LICENSE README.md "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - name: Release notes
+        run: |
+          awk -v tag="${GITHUB_REF_NAME}" '/^## \[/ { if (found) exit; if (index($0, "[" tag "]")) found = 1 } found' CHANGELOG.md > notes.md
+          test -s notes.md
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: notes.md
+          fail_on_unmatched_files: true
           files: |
             gpulens-*.tar.gz
             gpulens-*.tar.gz.sha256

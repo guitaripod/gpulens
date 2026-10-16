@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn scrub_shortens_home_directories() {
-        let out = scrub_command_line(&args(&["python3", "/home/marcus/Dev/x/main.py"]));
+        let out = scrub_command_line(&args(&["python3", "/home/alice/Dev/x/main.py"]));
         assert_eq!(out, "python3 ~/Dev/x/main.py");
     }
 
@@ -1034,11 +1034,11 @@ mod tests {
             (&["psql", "-P", "hunter2"], "psql -P <hidden>"),
             (&["psql", "-P5432"], "psql -P5432"),
             (
-                &["tool", "--config=/home/marcus/.env"],
+                &["tool", "--config=/home/alice/.env"],
                 "tool --config=<hidden>",
             ),
             (
-                &["cp", "/home/marcus/.ssh/id_ed25519", "/tmp/x"],
+                &["cp", "/home/alice/.ssh/id_ed25519", "/tmp/x"],
                 "cp <hidden> /tmp/x",
             ),
             (
@@ -1047,11 +1047,11 @@ mod tests {
             ),
             (&["tool", "/srv/Secrets/app.conf"], "tool <hidden>"),
             (
-                &["tool", "--input=/home/marcus/Dev/x.py"],
+                &["tool", "--input=/home/alice/Dev/x.py"],
                 "tool --input=~/Dev/x.py",
             ),
             (
-                &["python3", "/Users/marcus/proj/main.py"],
+                &["python3", "/Users/alice/proj/main.py"],
                 "python3 ~/proj/main.py",
             ),
             (
@@ -1078,9 +1078,9 @@ mod tests {
 
     #[test]
     fn scrub_path_shortens_every_home_directory() {
-        assert_eq!(scrub_path("/home/marcus/Dev/x"), "~/Dev/x");
-        assert_eq!(scrub_path("/home/marcus/a and /Users/bob/b"), "~/a and ~/b");
-        assert_eq!(scrub_path("/home/marcus"), "~");
+        assert_eq!(scrub_path("/home/alice/Dev/x"), "~/Dev/x");
+        assert_eq!(scrub_path("/home/alice/a and /Users/bob/b"), "~/a and ~/b");
+        assert_eq!(scrub_path("/home/alice"), "~");
         assert_eq!(scrub_path("/home//x"), "/home//x");
         assert_eq!(scrub_path("/opt/acme/zq-daemon"), "/opt/acme/zq-daemon");
     }

@@ -1,10 +1,48 @@
 # gpulens
 
+[![release](https://img.shields.io/github/v/release/guitaripod/gpulens?color=2ea043&label=release)](https://github.com/guitaripod/gpulens/releases)
+[![ci](https://github.com/guitaripod/gpulens/actions/workflows/ci.yml/badge.svg)](https://github.com/guitaripod/gpulens/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
+[![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20NVIDIA-76b900)](#project-status)
+[![rust](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org)
+[![status](https://img.shields.io/badge/status-early%20release-yellow)](#project-status)
+
 A GPU monitor that answers one question in plain language: **what is using my GPU right now, and why?**
 
 nvtop and nvidia-smi list process IDs and numbers. gpulens groups processes into the apps you actually know (a game, your browser, a language model server, the desktop), colours each app consistently across every view, and writes a sentence about the situation. An optional small local language model names programs it has never seen and phrases the summary in friendlier words.
 
 ![gpulens showing which apps use the GPU](docs/screenshot.png)
+
+## Project status
+
+**0.1.0, an early release.** Everything below marked verified was run on one machine (an RTX PRO 6000 Blackwell, driver 615, KDE Wayland). Expect rough edges on hardware I have not seen, and please open an issue when you find one.
+
+```text
+  ███████▒▒▒▒░░░   7 verified   ·   4 tested with fakes   ·   3 not there yet
+```
+
+| | Area | State | What that means |
+| :-: | --- | --- | --- |
+| ✅ | NVIDIA monitoring through NVML | Verified | RTX PRO 6000 Blackwell on driver 615 |
+| ✅ | Per-app GPU time and memory | Verified | checked against a real, busy GPU |
+| ✅ | Plain-language headline and findings | Verified | numbers come from readings and are checked before any AI rewrite is shown |
+| ✅ | Bars, history chart, detail pane, stop action | Verified | including a square window and 60×14 up to wide terminals |
+| ✅ | Calm layer: steady rows, smoothed numbers, glides | Verified | on a real desktop, rows moved several times less than with it off |
+| ✅ | Colour, 256, 16, no colour and ASCII output | Verified | render tests at many window sizes |
+| ✅ | AI helper with llama.cpp and llama-swap | Verified | Qwen3 4B Instruct, structured JSON in about a tenth of a second |
+| 🟡 | AI helper with Ollama, LM Studio or vLLM | Tested with fakes | discovery and requests run against mock servers, not the real thing |
+| 🟡 | More than one GPU | Tested with fakes | tabs and per-GPU colours are unit tested; not run on a real multi-GPU box |
+| 🟡 | GPUs without per-process data (older cards, MIG, vGPU) | Handled in code | says so in the headline instead of guessing; not run on one |
+| 🟡 | Containers | Handled in code | hidden processes show as "process 1234"; not run inside one |
+| ⬜ | Unified-memory systems | Not handled yet | |
+| ⬜ | AMD, Intel and Apple GPUs | Not supported | NVML only |
+| ⬜ | macOS and Windows | Not supported | Linux only |
+
+✅ verified on real hardware · 🟡 written and tested, never run on the real thing · ⬜ not there yet
+
+**By the numbers:** 390 tests and clean `clippy`, builds on Rust 1.88 and current stable, about 0.5% CPU while still and under 2% while animating, one 5 MB binary.
+
+**Next:** a real multi-GPU run, an AUR package, publishing to crates.io, unified-memory support. See [CHANGELOG.md](CHANGELOG.md) for what changed and [CONTRIBUTING.md](CONTRIBUTING.md) if you want to help.
 
 ## What you get
 
