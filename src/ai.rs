@@ -283,7 +283,15 @@ impl Worker {
 
     fn classify(&self, request: ClassifyRequest) -> Result<Outcome, JobError> {
         let client = self.client.as_ref().expect("checked before dispatch");
-        let verified = classify_with(client, &request)?;
+        let verified = match classify_with(client, &request) {
+            Err(JobError::Rejected(reason)) => {
+                let mut catalog = self.catalog.lock().unwrap_or_else(|p| p.into_inner());
+                catalog.record_declined(&request.signature, client.model());
+                let _ = catalog.save_learned();
+                return Err(JobError::Rejected(reason));
+            }
+            other => other?,
+        };
         let mut catalog = self.catalog.lock().unwrap_or_else(|p| p.into_inner());
         catalog.record_learned(
             &request.signature,

@@ -2,6 +2,14 @@
 
 All notable changes to gpulens are listed here. The format follows [Keep a Changelog](https://keepachangelog.com), and versions follow [Semantic Versioning](https://semver.org).
 
+## [0.1.2] - 2026-10-18
+
+### Changed
+- The headline rewrite is now off by default (`narrate = true` turns it on). It woke the model whenever the situation changed, which on a busy desktop kept it loaded in video memory.
+
+### Fixed
+- A program the model could not identify was asked about again every five minutes forever. It is now remembered and retried after a week.
+
 ## [0.1.1] - 2026-10-18
 
 ### Changed
@@ -27,5 +35,6 @@ First public release.
 - If one GPU fails to read, updates stop for all GPUs.
 - Unified-memory systems are not specially handled.
 
+[0.1.2]: https://github.com/guitaripod/gpulens/releases/tag/0.1.2
 [0.1.1]: https://github.com/guitaripod/gpulens/releases/tag/0.1.1
 [0.1.0]: https://github.com/guitaripod/gpulens/releases/tag/0.1.0

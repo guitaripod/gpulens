@@ -91,7 +91,7 @@ impl Default for LlmConfig {
             api_key_env: None,
             timeout_secs: 30,
             classify: true,
-            narrate: true,
+            narrate: false,
             narrate_cooldown_secs: 20,
         }
     }
@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(config.window_secs, 300);
         assert!(!config.ascii);
         assert!(config.allow_kill);
-        assert!(config.llm.enabled && config.llm.classify && config.llm.narrate);
+        assert!(config.llm.enabled && config.llm.classify && !config.llm.narrate);
         assert_eq!(config.llm.timeout_secs, 30);
         assert_eq!(config.llm.narrate_cooldown_secs, 20);
         assert_eq!(config.interval(), Duration::from_secs(1));
@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(config.interval_ms, 500);
         assert!(!config.llm.classify);
         assert_eq!(config.history_secs, 3600);
-        assert!(config.llm.narrate);
+        assert!(!config.llm.narrate);
         assert_eq!(config.llm.timeout_secs, 30);
     }
 

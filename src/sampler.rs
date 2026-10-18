@@ -70,6 +70,9 @@ impl Sampler {
             return;
         }
         let signature = meta.signature();
+        if self.identifier.recently_declined(&signature) {
+            return;
+        }
         if self
             .asked
             .get(&signature)

@@ -20,6 +20,9 @@ const LEARNED_VERSION: u32 = 1;
 const NAME_LIMIT: usize = 40;
 const DESCRIPTION_LIMIT: usize = 140;
 const SECS_PER_DAY: u64 = 86_400;
+/// A program the model could not identify is asked about again after this long (7 days).
+const DECLINED_RETRY_SECS: u64 = 7 * SECS_PER_DAY;
+
 /// Learned answers older than this are dropped by `prune_older_than` (90 days).
 pub const LEARNED_MAX_AGE_SECS: u64 = 90 * SECS_PER_DAY;
 
@@ -72,6 +75,8 @@ struct LearnedEntry {
     description: String,
     model: String,
     learned_at: u64,
+    #[serde(default)]
+    declined: bool,
 }
 
 impl Catalog {
@@ -140,9 +145,34 @@ impl Catalog {
             description: clip(description.trim(), DESCRIPTION_LIMIT),
             model: model.trim().to_string(),
             learned_at: now_secs(),
+            declined: false,
         };
         self.learned.insert(signature.to_string(), entry);
         self.dirty = true;
+    }
+
+    /// Remembers that the model could not tell what a program is, so it is not asked again until `DECLINED_RETRY_SECS` has passed.
+    pub fn record_declined(&mut self, signature: &str, model: &str) {
+        if self.learned.get(signature).is_some_and(|e| !e.declined) {
+            return;
+        }
+        let entry = LearnedEntry {
+            name: String::new(),
+            category: Category::Other,
+            description: String::new(),
+            model: model.trim().to_string(),
+            learned_at: now_secs(),
+            declined: true,
+        };
+        self.learned.insert(signature.to_string(), entry);
+        self.dirty = true;
+    }
+
+    /// Whether the model recently gave up on this program.
+    pub fn recently_declined(&self, signature: &str) -> bool {
+        self.learned.get(signature).is_some_and(|entry| {
+            entry.declined && now_secs().saturating_sub(entry.learned_at) < DECLINED_RETRY_SECS
+        })
     }
 
     /// Writes the learned cache only when something changed since the last load or save.
@@ -198,13 +228,16 @@ impl Catalog {
     }
 
     fn lookup_learned(&self, signature: &str) -> Option<Identity> {
-        self.learned.get(signature).map(|entry| Identity {
-            key: app_key(&entry.name),
-            name: entry.name.clone(),
-            category: entry.category,
-            description: entry.description.clone(),
-            source: IdentitySource::Learned,
-        })
+        self.learned
+            .get(signature)
+            .filter(|entry| !entry.declined)
+            .map(|entry| Identity {
+                key: app_key(&entry.name),
+                name: entry.name.clone(),
+                category: entry.category,
+                description: entry.description.clone(),
+                source: IdentitySource::Learned,
+            })
     }
 }
 
@@ -427,6 +460,30 @@ category = "game"
 
     fn learned_json(name: &str, learned_at: u64) -> serde_json::Value {
         json!({"name": name, "category": "ai", "description": "", "model": "m", "learned_at": learned_at})
+    }
+
+    #[test]
+    fn a_declined_program_is_not_asked_again_and_survives_a_restart() {
+        let (_dir, user, learned) = sandbox();
+        let mut catalog = Catalog::load(&user, &learned);
+        catalog.record_declined("mystery --serve", "m");
+        catalog.save_learned().unwrap();
+        let reloaded = Catalog::load(&user, &learned);
+        assert!(reloaded.recently_declined("mystery --serve"));
+        assert!(reloaded.lookup("mystery --serve").is_none());
+        assert!(!reloaded.recently_declined("other"));
+    }
+
+    #[test]
+    fn a_decline_is_retried_after_a_week_and_never_hides_a_real_answer() {
+        let (_dir, user, learned) = sandbox();
+        let mut catalog = Catalog::load(&user, &learned);
+        catalog.record_learned("known", "Known", Category::Ai, "Does things.", "m");
+        catalog.record_declined("known", "m");
+        assert_eq!(catalog.lookup("known").unwrap().name, "Known");
+        catalog.record_declined("old", "m");
+        catalog.learned.get_mut("old").unwrap().learned_at = now_secs() - DECLINED_RETRY_SECS - 1;
+        assert!(!catalog.recently_declined("old"));
     }
 
     #[test]

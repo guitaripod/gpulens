@@ -30,6 +30,14 @@ impl Identifier {
         }
     }
 
+    /// Whether the language model recently gave up on this program, so asking again would only wake it for nothing.
+    pub fn recently_declined(&self, signature: &str) -> bool {
+        self.catalog
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recently_declined(signature)
+    }
+
     /// Never fails: the worst case is the program's own name.
     pub fn identify(&self, meta: &ProcMeta) -> Identity {
         if !meta.accessible || meta.exe_name().is_empty() {

@@ -15,7 +15,7 @@ nvtop and nvidia-smi list process IDs and numbers. gpulens groups processes into
 
 ## Project status
 
-**0.1.1, an early release.** Everything below marked verified was run on one machine (an RTX PRO 6000 Blackwell, driver 615, KDE Wayland). Expect rough edges on hardware I have not seen, and please open an issue when you find one.
+**0.1.2, an early release.** Everything below marked verified was run on one machine (an RTX PRO 6000 Blackwell, driver 615, KDE Wayland). Expect rough edges on hardware I have not seen, and please open an issue when you find one.
 
 ```text
   ███████▒▒▒▒░░░   7 verified   ·   4 tested with fakes   ·   3 not there yet
@@ -126,8 +126,8 @@ Entirely optional, and off until you run `gpulens setup`. It talks to a model on
 
 What it does:
 
-1. **Names unfamiliar programs** once. The answer is checked, cached in `~/.cache/gpulens/learned.json`, and never asked again. Built-in rules and your own catalog always win over it.
-2. **Rewrites the headline** in friendlier words when the situation changes. A rewrite is discarded if it contains a number that is not in the readings, and it is only shown while it still describes the current situation. Press `a` to compare with the plain wording.
+1. **Names unfamiliar programs** once. The answer is checked, cached in `~/.cache/gpulens/learned.json`, and never asked again; a program the model cannot place is not asked about again for a week. Built-in rules and your own catalog always win over it, so a model is only woken for a program it has never seen.
+2. **Rewrites the headline** in friendlier words when the situation changes. Off by default (`narrate = true` turns it on), because it keeps the model busy and loaded on a busy desktop. A rewrite is discarded if it contains a number that is not in the readings, and it is only shown while it still describes the current situation. Press `a` to compare with the plain wording.
 3. **Explains an app** on request (`e`).
 
 What it does not do: it never sees your screen or files. For unfamiliar programs it sends the executable path and a scrubbed command line (secrets and long tokens removed, home directory shortened) to the server you chose, which is local unless you configured otherwise. It is never started or loaded behind your back: `setup` asks before using a model that is not already loaded, because starting one can push other models off the GPU. All calls run on a background thread with timeouts and a circuit breaker; if the server is slow or gone, the interface does not notice.
@@ -154,7 +154,7 @@ model = "qwen3-4b-instruct-gguf"
 api_key_env = "MY_KEY_VARIABLE"   # name of an environment variable, never the key itself
 timeout_secs = 30
 classify = true
-narrate = true
+narrate = false           # true: the model rewrites the headline whenever the situation changes
 narrate_cooldown_secs = 20
 ```
 
