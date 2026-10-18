@@ -2,6 +2,11 @@
 
 All notable changes to gpulens are listed here. The format follows [Keep a Changelog](https://keepachangelog.com), and versions follow [Semantic Versioning](https://semver.org).
 
+## [0.1.1] - 2026-10-18
+
+### Changed
+- A highlight resting on the top row now stays on whatever is first, so the list stays pinned to its top when the order changes or you change the sort. Move down once and the highlight follows that app again.
+
 ## [0.1.0] - 2026-10-17
 
 First public release.
@@ -22,4 +27,5 @@ First public release.
 - If one GPU fails to read, updates stop for all GPUs.
 - Unified-memory systems are not specially handled.
 
+[0.1.1]: https://github.com/guitaripod/gpulens/releases/tag/0.1.1
 [0.1.0]: https://github.com/guitaripod/gpulens/releases/tag/0.1.0

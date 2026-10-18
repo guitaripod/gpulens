@@ -15,7 +15,7 @@ nvtop and nvidia-smi list process IDs and numbers. gpulens groups processes into
 
 ## Project status
 
-**0.1.0, an early release.** Everything below marked verified was run on one machine (an RTX PRO 6000 Blackwell, driver 615, KDE Wayland). Expect rough edges on hardware I have not seen, and please open an issue when you find one.
+**0.1.1, an early release.** Everything below marked verified was run on one machine (an RTX PRO 6000 Blackwell, driver 615, KDE Wayland). Expect rough edges on hardware I have not seen, and please open an issue when you find one.
 
 ```text
   ███████▒▒▒▒░░░   7 verified   ·   4 tested with fakes   ·   3 not there yet

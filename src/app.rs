@@ -512,7 +512,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Keeps the highlighted row on the same application when the order changes, and on the same position when it disappears.
+    /// Keeps the highlighted row on the same application when the order changes, and on the same position when it disappears. A highlight resting on the top row stays on whatever is first, so the list stays pinned to its top.
     pub fn reconcile_selection(&mut self) {
         let keys: Vec<String> = self.visible().iter().map(|w| w.key.clone()).collect();
         if keys.is_empty() {
@@ -520,7 +520,7 @@ impl App {
             self.selected_row = 0;
             return;
         }
-        let first_live = self.visible().iter().position(|w| !w.exited).unwrap_or(0);
+        let first_live = self.first_live_row();
         let index = if self.user_chose {
             self.selection
                 .as_ref()
@@ -531,6 +531,10 @@ impl App {
         };
         self.selected_row = index;
         self.selection = Some(keys[index].clone());
+    }
+
+    fn first_live_row(&self) -> usize {
+        self.visible().iter().position(|w| !w.exited).unwrap_or(0)
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -554,7 +558,7 @@ impl App {
         if let Some(key) = key {
             self.selected_row = row;
             self.selection = Some(key);
-            self.user_chose = true;
+            self.user_chose = row != self.first_live_row();
             self.dirty = true;
         }
     }
@@ -979,12 +983,12 @@ mod tests {
         let mut a = app();
         feed_three(&mut a);
         a.handle(key(KeyCode::Down), Instant::now());
-        a.handle(key(KeyCode::Up), Instant::now());
+        a.handle(key(KeyCode::Down), Instant::now());
         a.handle(key(KeyCode::Char('s')), Instant::now());
         assert_eq!(a.sort, SortMode::Memory);
         let order: Vec<_> = a.visible().iter().map(|w| w.key.clone()).collect();
         assert_eq!(order, vec!["b", "a", "c"]);
-        assert_eq!(a.selection.as_deref(), Some("a"));
+        assert_eq!(a.selection.as_deref(), Some("c"));
     }
 
     #[test]
@@ -992,6 +996,18 @@ mod tests {
         let mut a = app();
         feed_three(&mut a);
         a.handle(key(KeyCode::Char('s')), Instant::now());
+        assert_eq!(a.selection.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_highlight_on_the_top_row_keeps_following_the_top_row() {
+        let mut a = app();
+        feed_three(&mut a);
+        a.handle(key(KeyCode::Down), Instant::now());
+        a.handle(key(KeyCode::Up), Instant::now());
+        assert_eq!(a.selected_row, 0);
+        a.handle(key(KeyCode::Char('s')), Instant::now());
+        assert_eq!(a.selected_row, 0);
         assert_eq!(a.selection.as_deref(), Some("b"));
     }
 
